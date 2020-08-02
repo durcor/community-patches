@@ -1,0 +1,27 @@
+diff --git a/dlls/ws2_32/socket.c b/dlls/ws2_32/socket.c
+index 12126372d5..9a858d279c 100644
+--- a/dlls/ws2_32/socket.c
++++ b/dlls/ws2_32/socket.c
+@@ -4780,6 +4852,22 @@ INT WINAPI WSAIoctl(SOCKET s, DWORD code, LPVOID in_buff, DWORD in_size, LPVOID
+         SetLastError(WSAEINVAL);
+         return SOCKET_ERROR;
+ 
++    case WS_SIO_IDEAL_SEND_BACKLOG_QUERY:
++    {
++        *(ULONG*)out_buff = 1000000;
++
++        if(ret_size) {
++            FIXME("ret_size yes %i %i %i\n", sizeof(DWORD), sizeof(ULONG), out_size);
++            *ret_size = out_size;
++            total = out_size;
++        } else {
++            FIXME("ret_size no\n");
++        }
++
++        FIXME("SIO_IDEAL_SEND_BACKLOG_QUERY: stub.\n");
++        break;
++    }
++
+    case WS_SIO_GET_INTERFACE_LIST:
+        {
+            INTERFACE_INFO* intArray = out_buff;

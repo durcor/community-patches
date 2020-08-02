@@ -1,0 +1,41 @@
+From 27c564fe91bfcc2b054ce13a48e3ff5998cb9f17 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 11 Jun 2020 10:59:06 +0200
+Subject: [PATCH] gdi32: Implement GdiDllInitialize stub.
+
+---
+ dlls/gdi32/gdi32.spec | 2 +-
+ dlls/gdi32/painting.c | 7 +++++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/gdi32/gdi32.spec b/dlls/gdi32/gdi32.spec
+index 725afebb8eb..dc63dbcbf32 100644
+--- a/dlls/gdi32/gdi32.spec
++++ b/dlls/gdi32/gdi32.spec
+@@ -182,7 +182,7 @@
+ @ stub GdiDeleteLocalObject
+ # @ stub GdiDeleteSpoolFileHandle
+ @ stdcall GdiDescribePixelFormat(long long long ptr)
+-@ stub GdiDllInitialize
++@ stdcall GdiDllInitialize(ptr long ptr)
+ @ stdcall GdiDrawStream(long long ptr)
+ # @ stub GdiEndDocEMF
+ # @ stub GdiEndPageEMF
+diff --git a/dlls/gdi32/painting.c b/dlls/gdi32/painting.c
+index 81937b8bbb4..119c1a6e010 100644
+--- a/dlls/gdi32/painting.c
++++ b/dlls/gdi32/painting.c
+@@ -37,6 +37,13 @@
+ WINE_DEFAULT_DEBUG_CHANNEL(gdi);
+ 
+ 
++BOOL WINAPI GdiDllInitialize(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
++{
++    FIXME( "(%p,%d,%p): stub\n", hinstDLL, fdwReason, lpvReserved );
++    return TRUE;
++}
++
++
+ /***********************************************************************
+  *           null driver fallback implementations
+  */

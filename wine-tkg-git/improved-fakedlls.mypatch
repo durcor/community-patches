@@ -1,0 +1,4738 @@
+From c0aba433c93275835368807c79e2543a56f5bbd9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michael=20M=C3=BCller?= <michael@fds-team.de>
+Date: Thu, 25 May 2017 07:02:46 +0200
+Subject: [PATCH 01/32] kernel32/tests: Add basic tests for fake dlls.
+
+---
+ dlls/kernel32/tests/loader.c | 91 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 91 insertions(+)
+
+diff --git a/dlls/kernel32/tests/loader.c b/dlls/kernel32/tests/loader.c
+index 59965984a67..984246681cb 100644
+--- a/dlls/kernel32/tests/loader.c
++++ b/dlls/kernel32/tests/loader.c
+@@ -1569,6 +1569,96 @@ static void test_filenames(void)
+     DeleteFileA( long_path );
+ }
+ 
++static void test_FakeDLL(void)
++{
++#ifdef __i386__
++    NTSTATUS (WINAPI *pNtSetEvent)(HANDLE, ULONG *) = NULL;
++    IMAGE_EXPORT_DIRECTORY *dir;
++    HMODULE module = GetModuleHandleA("ntdll.dll");
++    HANDLE file, map, event;
++    WCHAR path[MAX_PATH];
++    DWORD *names, *funcs;
++    WORD *ordinals;
++    ULONG size;
++    void *ptr;
++    int i;
++
++    GetModuleFileNameW(module, path, MAX_PATH);
++
++    file = CreateFileW(path, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, 0);
++    ok(file != INVALID_HANDLE_VALUE, "Failed to open %s (error %u)\n", wine_dbgstr_w(path), GetLastError());
++
++    map = CreateFileMappingW(file, NULL, PAGE_EXECUTE_READ | SEC_IMAGE, 0, 0, NULL);
++    ok(map != NULL, "CreateFileMapping failed with error %u\n", GetLastError());
++    ptr = MapViewOfFile(map, FILE_MAP_READ | FILE_MAP_EXECUTE, 0, 0, 0);
++    ok(ptr != NULL, "MapViewOfFile failed with error %u\n", GetLastError());
++
++    dir = RtlImageDirectoryEntryToData(ptr, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
++todo_wine
++    ok(dir != NULL, "RtlImageDirectoryEntryToData failed\n");
++    if (dir == NULL) goto done;
++
++    names    = RVAToAddr(dir->AddressOfNames, ptr);
++    ordinals = RVAToAddr(dir->AddressOfNameOrdinals, ptr);
++    funcs    = RVAToAddr(dir->AddressOfFunctions, ptr);
++    ok(dir->NumberOfNames > 0, "Could not find any exported functions\n");
++
++    for (i = 0; i < dir->NumberOfNames; i++)
++    {
++        DWORD map_rva, dll_rva, map_offset, dll_offset;
++        char *func_name = RVAToAddr(names[i], ptr);
++        BYTE *dll_func, *map_func;
++
++        /* check only Nt functions for now */
++        if (strncmp(func_name, "Zw", 2) && strncmp(func_name, "Nt", 2))
++            continue;
++
++        dll_func = (BYTE *)GetProcAddress(module, func_name);
++        ok(dll_func != NULL, "%s: GetProcAddress returned NULL\n", func_name);
++        if (dll_func[0] == 0x90 && dll_func[1] == 0x90 &&
++            dll_func[2] == 0x90 && dll_func[3] == 0x90)
++        {
++            todo_wine ok(0, "%s: Export is a stub-function, skipping\n", func_name);
++            continue;
++        }
++
++        /* check position in memory */
++        dll_rva = (DWORD_PTR)dll_func - (DWORD_PTR)module;
++        map_rva = funcs[ordinals[i]];
++        ok(map_rva == dll_rva, "%s: Rva of mapped function (0x%x) does not match dll (0x%x)\n",
++           func_name, dll_rva, map_rva);
++
++        /* check position in file */
++        map_offset = (DWORD_PTR)RtlImageRvaToVa(RtlImageNtHeader(ptr),    ptr,    map_rva, NULL) - (DWORD_PTR)ptr;
++        dll_offset = (DWORD_PTR)RtlImageRvaToVa(RtlImageNtHeader(module), module, dll_rva, NULL) - (DWORD_PTR)module;
++        ok(map_offset == dll_offset, "%s: File offset of mapped function (0x%x) does not match dll (0x%x)\n",
++           func_name, map_offset, dll_offset);
++
++        /* check function content */
++        map_func = RVAToAddr(map_rva, ptr);
++        ok(!memcmp(map_func, dll_func, 0x20), "%s: Function content does not match!\n", func_name);
++
++        if (!strcmp(func_name, "NtSetEvent"))
++            pNtSetEvent = (void *)map_func;
++    }
++
++    ok(pNtSetEvent != NULL, "Could not find NtSetEvent export\n");
++    if (pNtSetEvent)
++    {
++        event = CreateEventA(NULL, TRUE, FALSE, NULL);
++        ok(event != NULL, "CreateEvent failed with error %u\n", GetLastError());
++        pNtSetEvent(event, 0);
++        ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "Event was not signaled\n");
++        CloseHandle(event);
++    }
++
++done:
++    UnmapViewOfFile(ptr);
++    CloseHandle(map);
++    CloseHandle(file);
++#endif
++}
++
+ /* Verify linking style of import descriptors */
+ static void test_ImportDescriptors(void)
+ {
+@@ -4031,6 +4121,7 @@ START_TEST(loader)
+         return;
+     }
+ 
++    test_FakeDLL();
+     test_filenames();
+     test_ResolveDelayLoadedAPI();
+     test_ImportDescriptors();
+
+From cb43755b3051fbbcb3bb580d90e69a89f57f5460 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 01:28:41 +0200
+Subject: [PATCH 02/32] winebuild: Export __wine_spec_module symbol.
+
+So we can use NT header ImageBase for RVAs.
+---
+ dlls/ntdll/loader.c      |  3 ++-
+ dlls/ntdll/unix/loader.c |  4 ++--
+ tools/winebuild/spec32.c | 13 ++++++++-----
+ 3 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 2a0f1d51a30..f9773241c10 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -3932,6 +3932,7 @@ static NTSTATUS load_ntdll_so( HMODULE module, const IMAGE_NT_HEADERS *nt )
+  */
+ void __wine_process_init(void)
+ {
++    extern BYTE __wine_spec_module;
+     extern IMAGE_NT_HEADERS __wine_spec_nt_header;
+     static const WCHAR ntdllW[] = {'\\','?','?','\\','C',':','\\','w','i','n','d','o','w','s','\\',
+                                    's','y','s','t','e','m','3','2','\\',
+@@ -3945,7 +3946,7 @@ void __wine_process_init(void)
+     NTSTATUS status;
+     ANSI_STRING func_name;
+     UNICODE_STRING nt_name;
+-    HMODULE ntdll_module = (HMODULE)((__wine_spec_nt_header.OptionalHeader.ImageBase + 0xffff) & ~0xffff);
++    HMODULE ntdll_module = (HMODULE)(((UINT_PTR)&__wine_spec_module + 0xffff) & ~0xffff);
+     INITIAL_TEB stack;
+     SIZE_T info_size;
+     TEB *teb;
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 6b3fb32df03..f54f7a54e11 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -878,9 +878,9 @@ static NTSTATUS dlopen_dll( const char *so_name, void **ret_module )
+         LIST_FOR_EACH_ENTRY( builtin, &builtin_modules, struct builtin_module, entry )
+             if (builtin->module == module) goto already_loaded;
+     }
+-    else if ((nt = dlsym( handle, "__wine_spec_nt_header" )))
++    else if ((nt = dlsym( handle, "__wine_spec_nt_header" )) && (module = dlsym( handle, "__wine_spec_module" )))
+     {
+-        module = (HMODULE)((nt->OptionalHeader.ImageBase + 0xffff) & ~0xffff);
++        module = (HMODULE)(((UINT_PTR)module + 0xffff) & ~0xffff);
+         LIST_FOR_EACH_ENTRY( builtin, &builtin_modules, struct builtin_module, entry )
+             if (builtin->module == module) goto already_loaded;
+         if (map_so_dll( nt, module ))
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index b1e20e0484d..7403ebdf2c6 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -607,12 +607,14 @@ void output_module( DLLSPEC *spec )
+     case PLATFORM_APPLE:
+         output( "\t.text\n" );
+         output( "\t.align %d\n", get_alignment(page_size) );
+-        output( "__wine_spec_pe_header:\n" );
++        output( "\t.globl %s\n", asm_name("__wine_spec_module") );
++        output( "%s:\n", asm_name("__wine_spec_module") );
+         output( "\t.space 65536\n" );
+         break;
+     case PLATFORM_SOLARIS:
+         output( "\n\t.section \".text\",\"ax\"\n" );
+-        output( "__wine_spec_pe_header:\n" );
++        output( "\t.globl %s\n", asm_name("__wine_spec_module") );
++        output( "%s:\n", asm_name("__wine_spec_module") );
+         output( "\t.skip %u\n", 65536 + page_size );
+         break;
+     default:
+@@ -633,7 +635,8 @@ void output_module( DLLSPEC *spec )
+             output( "\tb 1f\n" );
+             break;
+         }
+-        output( "__wine_spec_pe_header:\n" );
++        output( "\t.globl %s\n", asm_name("__wine_spec_module") );
++        output( "%s:\n", asm_name("__wine_spec_module") );
+         output( "\t.skip %u\n", 65536 + page_size );
+         output( "1:\n" );
+         break;
+@@ -681,8 +684,8 @@ void output_module( DLLSPEC *spec )
+         output( "\t.long 0\n" );          /* BaseOfCode */
+         output( "\t.long 0\n" );          /* BaseOfData */
+     }
+-    output( "\t%s __wine_spec_pe_header\n",         /* ImageBase */
+-             get_asm_ptr_keyword() );
++    output( "\t%s %s\n",                  /* ImageBase */
++             get_asm_ptr_keyword(), asm_name("__wine_spec_module") );
+     output( "\t.long %u\n", page_size );  /* SectionAlignment */
+     output( "\t.long %u\n", page_size );  /* FileAlignment */
+     output( "\t.short 1,0\n" );           /* Major/MinorOperatingSystemVersion */
+
+From 9fb763d3bbb812c99aea4639408da74cb6b21397 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 11 Jun 2020 22:14:34 +0200
+Subject: [PATCH 03/32] winebuild: Output pre-generated DOS header.
+
+---
+ dlls/ntdll/unix/loader.c | 19 +++++--------------
+ tools/winebuild/spec32.c | 39 ++++++++++++++++++++++++++++++++++++---
+ 2 files changed, 41 insertions(+), 17 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index f54f7a54e11..85e0cfa7258 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -615,23 +615,15 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ 
+     if (wine_anon_mmap( addr, size, PROT_READ | PROT_WRITE, MAP_FIXED ) != addr) return STATUS_NO_MEMORY;
+ 
++    memmove(addr, (const BYTE *)nt_descr->OptionalHeader.ImageBase, size);
++
+     dos = (IMAGE_DOS_HEADER *)addr;
+-    nt  = (IMAGE_NT_HEADERS *)((BYTE *)(dos + 1) + sizeof(builtin_signature));
++    nt  = (IMAGE_NT_HEADERS *)((BYTE *)dos + dos->e_lfanew);
+     sec = (IMAGE_SECTION_HEADER *)(nt + 1);
+ 
+-    /* build the DOS and NT headers */
+-
+-    dos->e_magic    = IMAGE_DOS_SIGNATURE;
+-    dos->e_cblp     = 0x90;
+-    dos->e_cp       = 3;
+-    dos->e_cparhdr  = (sizeof(*dos) + 0xf) / 0x10;
+-    dos->e_minalloc = 0;
+-    dos->e_maxalloc = 0xffff;
+-    dos->e_ss       = 0x0000;
+-    dos->e_sp       = 0x00b8;
+-    dos->e_lfanew   = sizeof(*dos) + sizeof(builtin_signature);
++    /* build the NT headers */
+ 
+-    *nt = *nt_descr;
++    nt->OptionalHeader.ImageBase = (ULONG_PTR)addr;
+ 
+     delta      = (const BYTE *)nt_descr - addr;
+     align_mask = nt->OptionalHeader.SectionAlignment - 1;
+@@ -662,7 +654,6 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     nt->OptionalHeader.SizeOfInitializedData       = data_end - data_start;
+     nt->OptionalHeader.SizeOfUninitializedData     = 0;
+     nt->OptionalHeader.SizeOfImage                 = data_end;
+-    nt->OptionalHeader.ImageBase                   = (ULONG_PTR)addr;
+ 
+     /* build the code section */
+ 
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 7403ebdf2c6..7a5f6f9c3cf 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -642,10 +642,43 @@ void output_module( DLLSPEC *spec )
+         break;
+     }
+ 
+-    /* Output the NT header */
++    /* Output the DOS header */
+ 
+     output( "\n\t.data\n" );
+     output( "\t.align %d\n", get_alignment(get_ptr_size()) );
++    output( ".L__wine_spec_dos:\n" );
++    output( "\t.short 0x5a4d\n" );       /* e_magic */
++    output( "\t.short 0x90\n" );         /* e_cblp */
++    output( "\t.short 3\n" );            /* e_cp */
++    output( "\t.short 0\n" );            /* e_crlc */
++    output( "\t.short (%s-%s) / 16\n",   /* e_cparhdr */
++            asm_name("__wine_spec_nt_header"), ".L__wine_spec_dos" );
++    output( "\t.short 0x0000\n" );       /* e_minalloc */
++    output( "\t.short 0xffff\n" );       /* e_maxalloc */
++    output( "\t.short 0x0000\n" );       /* e_ss */
++    output( "\t.short 0x00b8\n" );       /* e_sp */
++    output( "\t.short 0\n" );            /* e_csum */
++    output( "\t.short 0\n" );            /* e_ip */
++    output( "\t.short 0\n" );            /* e_cs */
++    output( "\t.short %s-%s\n",          /* e_lfarlc */
++            asm_name("__wine_spec_nt_header"), ".L__wine_spec_dos" );
++    output( "\t.short 0\n" );            /* e_ovno */
++    output( "\t.long 0\n" );             /* e_res */
++    output( "\t.long 0\n" );
++    output( "\t.short 0\n" );            /* e_oemid */
++    output( "\t.short 0\n" );            /* e_oeminfo */
++    output( "\t.long 0\n" );             /* e_res2 */
++    output( "\t.long 0\n" );
++    output( "\t.long 0\n" );
++    output( "\t.long 0\n" );
++    output( "\t.long 0\n" );
++    output( "\t.long %s-%s\n",          /* e_lfanew */
++            asm_name("__wine_spec_nt_header"), ".L__wine_spec_dos" );
++    output( "\t.ascii \"Wine placeholder DLL\"\n" );
++
++    /* Output the NT header */
++
++    output( "\t.align 128, 0\n" );
+     output( "\t.globl %s\n", asm_name("__wine_spec_nt_header") );
+     output( "%s:\n", asm_name("__wine_spec_nt_header") );
+     output( ".L__wine_spec_rva_base:\n" );
+@@ -684,8 +717,8 @@ void output_module( DLLSPEC *spec )
+         output( "\t.long 0\n" );          /* BaseOfCode */
+         output( "\t.long 0\n" );          /* BaseOfData */
+     }
+-    output( "\t%s %s\n",                  /* ImageBase */
+-             get_asm_ptr_keyword(), asm_name("__wine_spec_module") );
++    output( "\t%s .L__wine_spec_dos\n",   /* ImageBase */
++             get_asm_ptr_keyword() );
+     output( "\t.long %u\n", page_size );  /* SectionAlignment */
+     output( "\t.long %u\n", page_size );  /* FileAlignment */
+     output( "\t.short 1,0\n" );           /* Major/MinorOperatingSystemVersion */
+
+From 821e10c128b233960c97bcf5baee122a3ddee85a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 10 Jun 2020 19:38:14 +0200
+Subject: [PATCH 04/32] winebuild: Compute RVAs relative to DOS header.
+
+Instead of incorrectly using NT header origin.
+---
+ dlls/ntdll/unix/loader.c | 5 +++--
+ tools/winebuild/import.c | 2 +-
+ tools/winebuild/spec32.c | 1 -
+ tools/winebuild/utils.c  | 2 +-
+ 4 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 85e0cfa7258..7e0ec84bcbf 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -159,7 +159,7 @@ static NTSTATUS add_builtin_module( void *module, void *handle, const FILE_OBJEC
+ 
+ static inline void *get_rva( const IMAGE_NT_HEADERS *nt, ULONG_PTR addr )
+ {
+-    return (BYTE *)nt + addr;
++    return (BYTE *)nt->OptionalHeader.ImageBase + addr;
+ }
+ 
+ /* adjust an array of pointers to make them into RVAs */
+@@ -613,6 +613,8 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+                   + sizeof(IMAGE_NT_HEADERS)
+                   + nb_sections * sizeof(IMAGE_SECTION_HEADER));
+ 
++    delta = (const BYTE *)nt_descr->OptionalHeader.ImageBase - addr;
++
+     if (wine_anon_mmap( addr, size, PROT_READ | PROT_WRITE, MAP_FIXED ) != addr) return STATUS_NO_MEMORY;
+ 
+     memmove(addr, (const BYTE *)nt_descr->OptionalHeader.ImageBase, size);
+@@ -625,7 +627,6 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ 
+     nt->OptionalHeader.ImageBase = (ULONG_PTR)addr;
+ 
+-    delta      = (const BYTE *)nt_descr - addr;
+     align_mask = nt->OptionalHeader.SectionAlignment - 1;
+     code_start = (size + align_mask) & ~align_mask;
+     data_start = delta & ~align_mask;
+diff --git a/tools/winebuild/import.c b/tools/winebuild/import.c
+index 04ab433dd65..0719025bee9 100644
+--- a/tools/winebuild/import.c
++++ b/tools/winebuild/import.c
+@@ -834,7 +834,7 @@ static void output_immediate_imports(void)
+                     else if (func->export_name) output( "__imp_%s:\n", asm_name( func->export_name ));
+                 }
+                 if (func->name)
+-                    output( "\t%s .L__wine_spec_import_data_%s_%s-.L__wine_spec_rva_base\n",
++                    output( "\t%s .L__wine_spec_import_data_%s_%s-.L__wine_spec_dos\n",
+                             get_asm_ptr_keyword(), import->c_name, func->name );
+                 else
+                 {
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 7a5f6f9c3cf..ff8762e450c 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -681,7 +681,6 @@ void output_module( DLLSPEC *spec )
+     output( "\t.align 128, 0\n" );
+     output( "\t.globl %s\n", asm_name("__wine_spec_nt_header") );
+     output( "%s:\n", asm_name("__wine_spec_nt_header") );
+-    output( ".L__wine_spec_rva_base:\n" );
+ 
+     output( "\t.long 0x4550\n" );         /* Signature */
+     switch(target_cpu)
+diff --git a/tools/winebuild/utils.c b/tools/winebuild/utils.c
+index 2a1fc960926..efc0637ba8a 100644
+--- a/tools/winebuild/utils.c
++++ b/tools/winebuild/utils.c
+@@ -1165,7 +1165,7 @@ void output_rva( const char *format, ... )
+     default:
+         output( "\t.long " );
+         vfprintf( output_file, format, valist );
+-        output( " - .L__wine_spec_rva_base\n" );
++        output( " - .L__wine_spec_dos\n" );
+         break;
+     }
+     va_end( valist );
+
+From 73e3b6cfa5d66cfc6629b51fb0d2699926aceaa7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 10 Jun 2020 20:52:05 +0200
+Subject: [PATCH 05/32] winebuild: Use RVAs in the export function pointers.
+
+---
+ dlls/ntdll/unix/loader.c |  2 +-
+ tools/winebuild/spec32.c | 16 +++++++---------
+ 2 files changed, 8 insertions(+), 10 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 7e0ec84bcbf..9a0b9d2ec4a 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -721,7 +721,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+         fixup_rva_dwords( &exports->AddressOfNames, delta, 1 );
+         fixup_rva_dwords( &exports->AddressOfNameOrdinals, delta, 1 );
+         fixup_rva_dwords( (DWORD *)(addr + exports->AddressOfNames), delta, exports->NumberOfNames );
+-        fixup_rva_ptrs( addr + exports->AddressOfFunctions, addr, exports->NumberOfFunctions );
++        fixup_rva_dwords( (DWORD *)(addr + exports->AddressOfFunctions), delta, exports->NumberOfFunctions );
+     }
+     return STATUS_SUCCESS;
+ }
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index ff8762e450c..15a645e9607 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -385,7 +385,6 @@ void output_exports( DLLSPEC *spec )
+     int needs_imports = 0;
+     int needs_relay = has_relays( spec );
+     int nr_exports = spec->base <= spec->limit ? spec->limit - spec->base + 1 : 0;
+-    const char *func_ptr = (target_platform == PLATFORM_WINDOWS) ? ".rva" : get_asm_ptr_keyword();
+     const char *name;
+ 
+     if (!nr_exports) return;
+@@ -422,8 +421,7 @@ void output_exports( DLLSPEC *spec )
+     for (i = spec->base; i <= spec->limit; i++)
+     {
+         ORDDEF *odp = spec->ordinals[i];
+-        if (!odp) output( "\t%s 0\n",
+-                          (target_platform == PLATFORM_WINDOWS) ? ".long" : get_asm_ptr_keyword() );
++        if (!odp) output( "\t.long 0\n" );
+         else switch(odp->type)
+         {
+         case TYPE_EXTERN:
+@@ -432,27 +430,27 @@ void output_exports( DLLSPEC *spec )
+         case TYPE_CDECL:
+             if (odp->flags & FLAG_FORWARD)
+             {
+-                output( "\t%s .L__wine_spec_forwards+%u\n", func_ptr, fwd_size );
++                output_rva( ".L__wine_spec_forwards+%u", fwd_size );
+                 fwd_size += strlen(odp->link_name) + 1;
+             }
+             else if ((odp->flags & FLAG_IMPORT) && (target_cpu == CPU_x86 || target_cpu == CPU_x86_64))
+             {
+                 name = odp->name ? odp->name : odp->export_name;
+-                if (name) output( "\t%s %s_%s\n", func_ptr, asm_name("__wine_spec_imp"), name );
+-                else output( "\t%s %s_%u\n", func_ptr, asm_name("__wine_spec_imp"), i );
++                if (name) output_rva( "%s_%s", asm_name("__wine_spec_imp"), name );
++                else output_rva( "%s_%u", asm_name("__wine_spec_imp"), i );
+                 needs_imports = 1;
+             }
+             else if (odp->flags & FLAG_EXT_LINK)
+             {
+-                output( "\t%s %s_%s\n", func_ptr, asm_name("__wine_spec_ext_link"), odp->link_name );
++                output_rva( "%s_%s", asm_name("__wine_spec_ext_link"), odp->link_name );
+             }
+             else
+             {
+-                output( "\t%s %s\n", func_ptr, asm_name( get_link_name( odp )));
++                output_rva( "%s", asm_name( get_link_name( odp )));
+             }
+             break;
+         case TYPE_STUB:
+-            output( "\t%s %s\n", func_ptr, asm_name( get_stub_name( odp, spec )) );
++            output_rva( "%s", asm_name( get_stub_name( odp, spec )) );
+             break;
+         default:
+             assert(0);
+
+From e1202cbe10d86ca33514c7aa0b1ca06762f319ec Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 11 Jun 2020 22:41:17 +0200
+Subject: [PATCH 06/32] winebuild: Output NT header SizeOfHeaders field.
+
+---
+ dlls/ntdll/unix/loader.c | 10 +++-------
+ tools/winebuild/spec32.c |  5 ++++-
+ 2 files changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 9a0b9d2ec4a..fcc96f1e953 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -599,19 +599,15 @@ void start_server( BOOL debug )
+  */
+ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ {
+-    static const char builtin_signature[32] = "Wine builtin DLL";
+     IMAGE_DATA_DIRECTORY *dir;
+     IMAGE_DOS_HEADER *dos;
+     IMAGE_NT_HEADERS *nt;
+     IMAGE_SECTION_HEADER *sec;
+     BYTE *addr = (BYTE *)module;
+     DWORD code_start, code_end, data_start, data_end, align_mask;
+-    int delta, nb_sections = 2;  /* code + data */
++    int delta;
+     unsigned int i;
+-    DWORD size = (sizeof(IMAGE_DOS_HEADER)
+-                  + sizeof(builtin_signature)
+-                  + sizeof(IMAGE_NT_HEADERS)
+-                  + nb_sections * sizeof(IMAGE_SECTION_HEADER));
++    DWORD size = nt_descr->OptionalHeader.SizeOfHeaders;
+ 
+     delta = (const BYTE *)nt_descr->OptionalHeader.ImageBase - addr;
+ 
+@@ -646,7 +642,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ 
+     fixup_rva_ptrs( &nt->OptionalHeader.AddressOfEntryPoint, addr, 1 );
+ 
+-    nt->FileHeader.NumberOfSections                = nb_sections;
++    nt->FileHeader.NumberOfSections                = 2;
+     nt->OptionalHeader.BaseOfCode                  = code_start;
+ #ifndef _WIN64
+     nt->OptionalHeader.BaseOfData                  = data_start;
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 15a645e9607..9b58790f694 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -724,7 +724,7 @@ void output_module( DLLSPEC *spec )
+              spec->subsystem_major, spec->subsystem_minor );
+     output( "\t.long 0\n" );                          /* Win32VersionValue */
+     output_rva( "%s", asm_name("_end") ); /* SizeOfImage */
+-    output( "\t.long %u\n", page_size );  /* SizeOfHeaders */
++    output_rva( ".L__wine_spec_pe_end" ); /* SizeOfHeaders */
+     output( "\t.long 0\n" );              /* CheckSum */
+     output( "\t.short 0x%04x\n",          /* Subsystem */
+              spec->subsystem );
+@@ -746,6 +746,9 @@ void output_module( DLLSPEC *spec )
+ 
+     output_data_directories( data_dirs );
+ 
++    output( "\t.align %u, 0\n", page_size );
++    output( "\t.L__wine_spec_pe_end:\n" );
++
+     if (target_platform == PLATFORM_APPLE)
+         output( "\t.lcomm %s,4\n", asm_name("_end") );
+ }
+
+From cba0604f407dc3ea60b5eb79704ca590fb5a319e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 11 Jun 2020 21:14:10 +0200
+Subject: [PATCH 07/32] ntdll: Keep and fixup pre-existing sections headers.
+
+---
+ dlls/ntdll/unix/loader.c | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index fcc96f1e953..981242e1efa 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -619,6 +619,15 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     nt  = (IMAGE_NT_HEADERS *)((BYTE *)dos + dos->e_lfanew);
+     sec = (IMAGE_SECTION_HEADER *)(nt + 1);
+ 
++    /* fixup the sections */
++
++    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
++    {
++        fixup_rva_dwords( &sec[i].VirtualAddress, delta, 1 );
++        fixup_rva_dwords( &sec[i].PointerToRawData, delta, 1 );
++    }
++    sec = sec + nt->FileHeader.NumberOfSections;
++
+     /* build the NT headers */
+ 
+     nt->OptionalHeader.ImageBase = (ULONG_PTR)addr;
+@@ -642,7 +651,6 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ 
+     fixup_rva_ptrs( &nt->OptionalHeader.AddressOfEntryPoint, addr, 1 );
+ 
+-    nt->FileHeader.NumberOfSections                = 2;
+     nt->OptionalHeader.BaseOfCode                  = code_start;
+ #ifndef _WIN64
+     nt->OptionalHeader.BaseOfData                  = data_start;
+@@ -660,6 +668,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     sec->VirtualAddress   = code_start;
+     sec->PointerToRawData = code_start;
+     sec->Characteristics  = (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ);
++    nt->FileHeader.NumberOfSections++;
+     sec++;
+ 
+     /* build the data section */
+@@ -671,6 +680,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     sec->PointerToRawData = data_start;
+     sec->Characteristics  = (IMAGE_SCN_CNT_INITIALIZED_DATA |
+                              IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_READ);
++    nt->FileHeader.NumberOfSections++;
+     sec++;
+ 
+     for (i = 0; i < nt->OptionalHeader.NumberOfRvaAndSizes; i++)
+
+From 7380a3ad28ac94c2468cdacc7a7fcaa8d824b0e1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 11:42:47 +0200
+Subject: [PATCH 08/32] ntdll: Make writable PE section memory writable.
+
+---
+ dlls/ntdll/unix/loader.c | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 981242e1efa..212c18f5f60 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -592,6 +592,35 @@ void start_server( BOOL debug )
+ }
+ 
+ 
++/*************************************************************************
++ *      remap_writable
++ *
++ * Remap memory with write permissions, copying it if necessary.
++ */
++static NTSTATUS remap_writable( void *addr, size_t size )
++{
++    void *tmp;
++    int res;
++
++    if (!(res = mprotect( addr, size, PROT_READ | PROT_WRITE )))
++        return STATUS_SUCCESS;
++
++    if ((tmp = wine_anon_mmap( NULL, size, PROT_READ | PROT_WRITE, 0 )) == MAP_FAILED)
++        return STATUS_NO_MEMORY;
++    memcpy(tmp, addr, size);
++
++    if (wine_anon_mmap( addr, size, PROT_READ | PROT_WRITE, MAP_FIXED ) != addr)
++    {
++        munmap(tmp, size);
++        return STATUS_NO_MEMORY;
++    }
++
++    memcpy(addr, tmp, size);
++    munmap(tmp, size);
++    return STATUS_SUCCESS;
++}
++
++
+ /*************************************************************************
+  *		map_so_dll
+  *
+@@ -625,6 +654,10 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     {
+         fixup_rva_dwords( &sec[i].VirtualAddress, delta, 1 );
+         fixup_rva_dwords( &sec[i].PointerToRawData, delta, 1 );
++
++        if ((sec[i].Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) &&
++            remap_writable( addr + sec[i].VirtualAddress, sec[i].Misc.VirtualSize ))
++            return STATUS_NO_MEMORY;
+     }
+     sec = sec + nt->FileHeader.NumberOfSections;
+ 
+@@ -794,10 +827,14 @@ static void fixup_ntdll_imports( const IMAGE_NT_HEADERS *nt )
+     const IMAGE_IMPORT_DESCRIPTOR *descr;
+     const IMAGE_THUNK_DATA *import_list;
+     IMAGE_THUNK_DATA *thunk_list;
++    NTSTATUS status;
+ 
+     assert( ntdll_exports );
+ 
+     descr = get_rva( nt, nt->OptionalHeader.DataDirectory[IMAGE_FILE_IMPORT_DIRECTORY].VirtualAddress );
++    status = remap_writable( (void *)descr, nt->OptionalHeader.DataDirectory[IMAGE_FILE_IMPORT_DIRECTORY].Size );
++    assert(status == STATUS_SUCCESS);
++
+ 
+     /* ntdll must be the only import */
+     assert( !strcmp( get_rva( nt, descr->Name ), "ntdll.dll" ));
+
+From 0fdfc89cfaf48a293240daed18de65a2067ce83c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 11 Jun 2020 21:35:55 +0200
+Subject: [PATCH 09/32] winebuild: Use RVA for AddressOfEntryPoint.
+
+---
+ dlls/ntdll/unix/loader.c | 2 +-
+ tools/winebuild/spec32.c | 9 +++------
+ 2 files changed, 4 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 212c18f5f60..66468ddd327 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -682,7 +682,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     data_end   = (nt->OptionalHeader.SizeOfImage + delta + align_mask) & ~align_mask;
+ #endif
+ 
+-    fixup_rva_ptrs( &nt->OptionalHeader.AddressOfEntryPoint, addr, 1 );
++    fixup_rva_dwords( &nt->OptionalHeader.AddressOfEntryPoint, delta, 1 );
+ 
+     nt->OptionalHeader.BaseOfCode                  = code_start;
+ #ifndef _WIN64
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 9b58790f694..e4ca20e06be 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -706,14 +706,11 @@ void output_module( DLLSPEC *spec )
+     output( "\t.long 0\n" );              /* SizeOfCode */
+     output( "\t.long 0\n" );              /* SizeOfInitializedData */
+     output( "\t.long 0\n" );              /* SizeOfUninitializedData */
+-    /* note: we expand the AddressOfEntryPoint field on 64-bit by overwriting the BaseOfCode field */
+-    output( "\t%s %s\n",                  /* AddressOfEntryPoint */
+-            get_asm_ptr_keyword(), spec->init_func ? asm_name(spec->init_func) : "0" );
++    output_rva( spec->init_func ?         /* AddressOfEntryPoint */
++                asm_name(spec->init_func) : "0" );
++    output( "\t.long 0\n" );              /* BaseOfCode */
+     if (get_ptr_size() == 4)
+-    {
+-        output( "\t.long 0\n" );          /* BaseOfCode */
+         output( "\t.long 0\n" );          /* BaseOfData */
+-    }
+     output( "\t%s .L__wine_spec_dos\n",   /* ImageBase */
+              get_asm_ptr_keyword() );
+     output( "\t.long %u\n", page_size );  /* SectionAlignment */
+
+From 8bd6d256a47a1b2c30b6589d3db48bb0dda4d2b5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 11 Jun 2020 21:35:55 +0200
+Subject: [PATCH 10/32] winebuild: Output .data section header.
+
+The .data section will be kept last and the .text section will be first,
+so that we can add PE sections in the middle and keep track of the
+code_start / code_end, until we can get the linker generate it for us.
+---
+ dlls/ntdll/unix/loader.c | 38 ++++++--------------------------------
+ tools/winebuild/build.h  |  1 +
+ tools/winebuild/spec32.c | 39 ++++++++++++++++++++++++++++++++++++---
+ tools/winebuild/utils.c  | 10 ++++++++++
+ 4 files changed, 53 insertions(+), 35 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 66468ddd327..c006f05542d 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -633,7 +633,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     IMAGE_NT_HEADERS *nt;
+     IMAGE_SECTION_HEADER *sec;
+     BYTE *addr = (BYTE *)module;
+-    DWORD code_start, code_end, data_start, data_end, align_mask;
++    DWORD code_start, code_end, align_mask;
+     int delta;
+     unsigned int i;
+     DWORD size = nt_descr->OptionalHeader.SizeOfHeaders;
+@@ -650,10 +650,14 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ 
+     /* fixup the sections */
+ 
++    fixup_rva_dwords( &nt->OptionalHeader.SizeOfImage, delta, 1 );
++    code_end = nt->OptionalHeader.SizeOfImage;
++
+     for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+     {
+         fixup_rva_dwords( &sec[i].VirtualAddress, delta, 1 );
+         fixup_rva_dwords( &sec[i].PointerToRawData, delta, 1 );
++        if (code_end > sec[i].VirtualAddress) code_end = sec[i].VirtualAddress;
+ 
+         if ((sec[i].Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) &&
+             remap_writable( addr + sec[i].VirtualAddress, sec[i].Misc.VirtualSize ))
+@@ -667,31 +671,13 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ 
+     align_mask = nt->OptionalHeader.SectionAlignment - 1;
+     code_start = (size + align_mask) & ~align_mask;
+-    data_start = delta & ~align_mask;
+-#ifdef __APPLE__
+-    {
+-        Dl_info dli;
+-        unsigned long data_size;
+-        /* need the mach_header, not the PE header, to give to getsegmentdata(3) */
+-        dladdr(addr, &dli);
+-        code_end   = getsegmentdata(dli.dli_fbase, "__DATA", &data_size) - addr;
+-        data_end   = (code_end + data_size + align_mask) & ~align_mask;
+-    }
+-#else
+-    code_end   = data_start;
+-    data_end   = (nt->OptionalHeader.SizeOfImage + delta + align_mask) & ~align_mask;
+-#endif
+-
+     fixup_rva_dwords( &nt->OptionalHeader.AddressOfEntryPoint, delta, 1 );
+ 
+     nt->OptionalHeader.BaseOfCode                  = code_start;
+ #ifndef _WIN64
+-    nt->OptionalHeader.BaseOfData                  = data_start;
++    fixup_rva_dwords( &nt->OptionalHeader.BaseOfData, delta, 1 );
+ #endif
+     nt->OptionalHeader.SizeOfCode                  = code_end - code_start;
+-    nt->OptionalHeader.SizeOfInitializedData       = data_end - data_start;
+-    nt->OptionalHeader.SizeOfUninitializedData     = 0;
+-    nt->OptionalHeader.SizeOfImage                 = data_end;
+ 
+     /* build the code section */
+ 
+@@ -704,18 +690,6 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     nt->FileHeader.NumberOfSections++;
+     sec++;
+ 
+-    /* build the data section */
+-
+-    memcpy( sec->Name, ".data", sizeof(".data") );
+-    sec->SizeOfRawData = data_end - data_start;
+-    sec->Misc.VirtualSize = sec->SizeOfRawData;
+-    sec->VirtualAddress   = data_start;
+-    sec->PointerToRawData = data_start;
+-    sec->Characteristics  = (IMAGE_SCN_CNT_INITIALIZED_DATA |
+-                             IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_READ);
+-    nt->FileHeader.NumberOfSections++;
+-    sec++;
+-
+     for (i = 0; i < nt->OptionalHeader.NumberOfRvaAndSizes; i++)
+         fixup_rva_dwords( &nt->OptionalHeader.DataDirectory[i].VirtualAddress, delta, 1 );
+ 
+diff --git a/tools/winebuild/build.h b/tools/winebuild/build.h
+index c162888a035..c3a8756e010 100644
+--- a/tools/winebuild/build.h
++++ b/tools/winebuild/build.h
+@@ -285,6 +285,7 @@ extern const char *func_declaration( const char *func );
+ extern const char *asm_globl( const char *func );
+ extern const char *get_asm_ptr_keyword(void);
+ extern const char *get_asm_string_keyword(void);
++extern const char *get_asm_data_section(void);
+ extern const char *get_asm_export_section(void);
+ extern const char *get_asm_rodata_section(void);
+ extern const char *get_asm_rsrc_section(void);
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index e4ca20e06be..314f1ee2c62 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -141,6 +141,14 @@ static void get_arg_string( ORDDEF *odp, char str[MAX_ARGUMENTS + 1] )
+         strcpy( str + i, "I" );
+ }
+ 
++static void output_size( const char *name )
++{
++    if (!strcmp(name, ".L__wine_spec_data"))
++        output( "\t.long %s - %s\n", asm_name("_end"), name );
++    else
++        output( "\t.long %s_end - %s\n", name, name );
++}
++
+ static void output_data_directories( const char *names[16] )
+ {
+     int i;
+@@ -595,6 +603,7 @@ void output_module( DLLSPEC *spec )
+     int machine = 0;
+     unsigned int page_size = get_page_size();
+     const char *data_dirs[16] = { NULL };
++    unsigned int nb_sections = 1;
+ 
+     /* Reserve some space for the PE header */
+ 
+@@ -691,7 +700,8 @@ void output_module( DLLSPEC *spec )
+     }
+     output( "\t.short 0x%04x\n",          /* Machine */
+              machine );
+-    output( "\t.short 0\n" );             /* NumberOfSections */
++    output( "\t.short 0x%04x\n",          /* NumberOfSections */
++             nb_sections );
+     output( "\t.long 0\n" );              /* TimeDateStamp */
+     output( "\t.long 0\n" );              /* PointerToSymbolTable */
+     output( "\t.long 0\n" );              /* NumberOfSymbols */
+@@ -704,13 +714,13 @@ void output_module( DLLSPEC *spec )
+     output( "\t.byte 7\n" );              /* MajorLinkerVersion */
+     output( "\t.byte 10\n" );             /* MinorLinkerVersion */
+     output( "\t.long 0\n" );              /* SizeOfCode */
+-    output( "\t.long 0\n" );              /* SizeOfInitializedData */
++    output_size( ".L__wine_spec_data" );  /* SizeOfInitializedData */
+     output( "\t.long 0\n" );              /* SizeOfUninitializedData */
+     output_rva( spec->init_func ?         /* AddressOfEntryPoint */
+                 asm_name(spec->init_func) : "0" );
+     output( "\t.long 0\n" );              /* BaseOfCode */
+     if (get_ptr_size() == 4)
+-        output( "\t.long 0\n" );          /* BaseOfData */
++        output_rva( ".L__wine_spec_data" ); /* BaseOfData */
+     output( "\t%s .L__wine_spec_dos\n",   /* ImageBase */
+              get_asm_ptr_keyword() );
+     output( "\t.long %u\n", page_size );  /* SectionAlignment */
+@@ -743,6 +753,20 @@ void output_module( DLLSPEC *spec )
+ 
+     output_data_directories( data_dirs );
+ 
++    /* .data section */
++    output( "\t.ascii \".data\"\n" );                  /* Name */
++    output( "\t.align 8, 0\n" );
++    output_size( ".L__wine_spec_data" );               /* VirtualSize */
++    output_rva( "%s", ".L__wine_spec_data" );          /* VirtualAddress */
++    output_size( ".L__wine_spec_data" );               /* SizeOfRawData */
++    output_rva( "%s", ".L__wine_spec_data" );          /* PointerToRawData */
++    output( "\t.long 0\n" );                           /* PointerToRelocations */
++    output( "\t.long 0\n" );                           /* PointerToLinenumbers */
++    output( "\t.short 0\n" );                          /* NumberOfRelocations */
++    output( "\t.short 0\n" );                          /* NumberOfLinenumbers */
++    output( "\t.long 0xc0000040\n"                     /* Characteristics */
++            /* CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE */ );
++
+     output( "\t.align %u, 0\n", page_size );
+     output( "\t.L__wine_spec_pe_end:\n" );
+ 
+@@ -758,10 +782,19 @@ void output_module( DLLSPEC *spec )
+  */
+ void output_spec32_file( DLLSPEC *spec )
+ {
++    unsigned int page_size = get_page_size();
+     needs_get_pc_thunk = 0;
+     open_output_file();
+     output_standard_file_header();
+     output_module( spec );
++
++    if (target_platform != PLATFORM_WINDOWS)
++    {
++        output( "\t%s\n", get_asm_data_section() );
++        output( "\t.align %u, 0\n", page_size );
++        output( "\t.L__wine_spec_data:\n" );
++    }
++
+     output_stubs( spec );
+     output_exports( spec );
+     output_imports( spec );
+diff --git a/tools/winebuild/utils.c b/tools/winebuild/utils.c
+index efc0637ba8a..5a102d80a1e 100644
+--- a/tools/winebuild/utils.c
++++ b/tools/winebuild/utils.c
+@@ -1238,6 +1238,16 @@ const char *get_asm_string_keyword(void)
+     }
+ }
+ 
++const char *get_asm_data_section(void)
++{
++    switch (target_platform)
++    {
++    case PLATFORM_APPLE:   return ".data";
++    case PLATFORM_WINDOWS: return ".section .data";
++    default:               return ".section .data";
++    }
++}
++
+ const char *get_asm_export_section(void)
+ {
+     switch (target_platform)
+
+From 4f69d31661fd2d6678f731ffc793918cdb26fa1f Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 09:20:59 +0200
+Subject: [PATCH 11/32] winebuild: Reduce .data section size.
+
+---
+ tools/winebuild/spec32.c | 18 ++++++++++--------
+ 1 file changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 314f1ee2c62..deebc9c06e8 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -143,10 +143,7 @@ static void get_arg_string( ORDDEF *odp, char str[MAX_ARGUMENTS + 1] )
+ 
+ static void output_size( const char *name )
+ {
+-    if (!strcmp(name, ".L__wine_spec_data"))
+-        output( "\t.long %s - %s\n", asm_name("_end"), name );
+-    else
+-        output( "\t.long %s_end - %s\n", name, name );
++    output( "\t.long %s_end - %s\n", name, name );
+ }
+ 
+ static void output_data_directories( const char *names[16] )
+@@ -730,7 +727,7 @@ void output_module( DLLSPEC *spec )
+     output( "\t.short %u,%u\n",           /* Major/MinorSubsystemVersion */
+              spec->subsystem_major, spec->subsystem_minor );
+     output( "\t.long 0\n" );                          /* Win32VersionValue */
+-    output_rva( "%s", asm_name("_end") ); /* SizeOfImage */
++    output_rva( ".L__wine_spec_end" );    /* SizeOfImage */
+     output_rva( ".L__wine_spec_pe_end" ); /* SizeOfHeaders */
+     output( "\t.long 0\n" );              /* CheckSum */
+     output( "\t.short 0x%04x\n",          /* Subsystem */
+@@ -769,9 +766,6 @@ void output_module( DLLSPEC *spec )
+ 
+     output( "\t.align %u, 0\n", page_size );
+     output( "\t.L__wine_spec_pe_end:\n" );
+-
+-    if (target_platform == PLATFORM_APPLE)
+-        output( "\t.lcomm %s,4\n", asm_name("_end") );
+ }
+ 
+ 
+@@ -800,6 +794,14 @@ void output_spec32_file( DLLSPEC *spec )
+     output_imports( spec );
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+     output_resources( spec );
++
++    if (target_platform != PLATFORM_WINDOWS)
++    {
++        output( "\t%s\n", get_asm_data_section() );
++        output( "\t.L__wine_spec_data_end:\n" );
++        output( "\t.L__wine_spec_end:\n" );
++    }
++
+     output_gnu_stack_note();
+     close_output_file();
+ }
+
+From adaf314bb773657bc01ace981aec94d2ec83f3f1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 09:20:59 +0200
+Subject: [PATCH 12/32] winebuild: Output .text section header.
+
+---
+ dlls/ntdll/unix/loader.c | 31 ++++++++++++-------------------
+ tools/winebuild/spec32.c | 22 ++++++++++++++++++++--
+ 2 files changed, 32 insertions(+), 21 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index c006f05542d..0346addf8aa 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -633,7 +633,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     IMAGE_NT_HEADERS *nt;
+     IMAGE_SECTION_HEADER *sec;
+     BYTE *addr = (BYTE *)module;
+-    DWORD code_start, code_end, align_mask;
++    DWORD code_end;
+     int delta;
+     unsigned int i;
+     DWORD size = nt_descr->OptionalHeader.SizeOfHeaders;
+@@ -657,38 +657,31 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     {
+         fixup_rva_dwords( &sec[i].VirtualAddress, delta, 1 );
+         fixup_rva_dwords( &sec[i].PointerToRawData, delta, 1 );
+-        if (code_end > sec[i].VirtualAddress) code_end = sec[i].VirtualAddress;
++
++        if (memcmp( sec[i].Name, ".text", sizeof(".text" )) && code_end > sec[i].VirtualAddress)
++            code_end = sec[i].VirtualAddress;
+ 
+         if ((sec[i].Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) &&
+             remap_writable( addr + sec[i].VirtualAddress, sec[i].Misc.VirtualSize ))
+             return STATUS_NO_MEMORY;
+     }
+-    sec = sec + nt->FileHeader.NumberOfSections;
+ 
+     /* build the NT headers */
+ 
+     nt->OptionalHeader.ImageBase = (ULONG_PTR)addr;
+ 
+-    align_mask = nt->OptionalHeader.SectionAlignment - 1;
+-    code_start = (size + align_mask) & ~align_mask;
+     fixup_rva_dwords( &nt->OptionalHeader.AddressOfEntryPoint, delta, 1 );
+-
+-    nt->OptionalHeader.BaseOfCode                  = code_start;
++    fixup_rva_dwords( &nt->OptionalHeader.BaseOfCode, delta, 1 );
+ #ifndef _WIN64
+     fixup_rva_dwords( &nt->OptionalHeader.BaseOfData, delta, 1 );
+ #endif
+-    nt->OptionalHeader.SizeOfCode                  = code_end - code_start;
+-
+-    /* build the code section */
+-
+-    memcpy( sec->Name, ".text", sizeof(".text") );
+-    sec->SizeOfRawData = code_end - code_start;
+-    sec->Misc.VirtualSize = sec->SizeOfRawData;
+-    sec->VirtualAddress   = code_start;
+-    sec->PointerToRawData = code_start;
+-    sec->Characteristics  = (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ);
+-    nt->FileHeader.NumberOfSections++;
+-    sec++;
++    nt->OptionalHeader.SizeOfCode = code_end - nt->OptionalHeader.BaseOfCode;
++
++    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
++    {
++        if (memcmp( sec[i].Name, ".text", sizeof(".text" ))) continue;
++        sec[i].Misc.VirtualSize = sec[i].SizeOfRawData = nt->OptionalHeader.SizeOfCode;
++    }
+ 
+     for (i = 0; i < nt->OptionalHeader.NumberOfRvaAndSizes; i++)
+         fixup_rva_dwords( &nt->OptionalHeader.DataDirectory[i].VirtualAddress, delta, 1 );
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index deebc9c06e8..af7af0dc7b9 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -600,7 +600,7 @@ void output_module( DLLSPEC *spec )
+     int machine = 0;
+     unsigned int page_size = get_page_size();
+     const char *data_dirs[16] = { NULL };
+-    unsigned int nb_sections = 1;
++    unsigned int nb_sections = 2;
+ 
+     /* Reserve some space for the PE header */
+ 
+@@ -715,7 +715,7 @@ void output_module( DLLSPEC *spec )
+     output( "\t.long 0\n" );              /* SizeOfUninitializedData */
+     output_rva( spec->init_func ?         /* AddressOfEntryPoint */
+                 asm_name(spec->init_func) : "0" );
+-    output( "\t.long 0\n" );              /* BaseOfCode */
++    output_rva( ".L__wine_spec_text" );   /* BaseOfCode */
+     if (get_ptr_size() == 4)
+         output_rva( ".L__wine_spec_data" ); /* BaseOfData */
+     output( "\t%s .L__wine_spec_dos\n",   /* ImageBase */
+@@ -750,6 +750,20 @@ void output_module( DLLSPEC *spec )
+ 
+     output_data_directories( data_dirs );
+ 
++    /* .text section */
++    output( "\t.ascii \".text\"\n" );                  /* Name */
++    output( "\t.align 8, 0\n" );
++    output( "\t.long 0\n" );                           /* VirtualSize */
++    output_rva( "%s", ".L__wine_spec_text" );          /* VirtualAddress */
++    output( "\t.long 0\n" );                           /* SizeOfRawData */
++    output_rva( "%s", ".L__wine_spec_text" );          /* PointerToRawData */
++    output( "\t.long 0\n" );                           /* PointerToRelocations */
++    output( "\t.long 0\n" );                           /* PointerToLinenumbers */
++    output( "\t.short 0\n" );                          /* NumberOfRelocations */
++    output( "\t.short 0\n" );                          /* NumberOfLinenumbers */
++    output( "\t.long 0x60000020\n"                     /* Characteristics */
++            /* CNT_CODE|MEM_READ|MEM_EXECUTE */ );
++
+     /* .data section */
+     output( "\t.ascii \".data\"\n" );                  /* Name */
+     output( "\t.align 8, 0\n" );
+@@ -784,6 +798,10 @@ void output_spec32_file( DLLSPEC *spec )
+ 
+     if (target_platform != PLATFORM_WINDOWS)
+     {
++        output( "\t.section .init\n" );
++        output( "\t.align %u\n", page_size );
++        output( "\t.L__wine_spec_text:\n" );
++
+         output( "\t%s\n", get_asm_data_section() );
+         output( "\t.align %u, 0\n", page_size );
+         output( "\t.L__wine_spec_data:\n" );
+
+From e6dfe8273c52027b9728362294187a350c83f455 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 17 Jun 2020 17:53:28 +0200
+Subject: [PATCH 13/32] winebuild: Output relay data to .data section.
+
+---
+ tools/winebuild/build.h  |  1 +
+ tools/winebuild/spec16.c |  1 +
+ tools/winebuild/spec32.c | 58 ++++++++++++++++++++--------------------
+ 3 files changed, 31 insertions(+), 29 deletions(-)
+
+diff --git a/tools/winebuild/build.h b/tools/winebuild/build.h
+index c3a8756e010..b5a45a10968 100644
+--- a/tools/winebuild/build.h
++++ b/tools/winebuild/build.h
+@@ -300,6 +300,7 @@ extern void read_undef_symbols( DLLSPEC *spec, char **argv );
+ extern void resolve_imports( DLLSPEC *spec );
+ extern int is_undefined( const char *name );
+ extern int has_imports(void);
++extern void output_relay_data( DLLSPEC *spec );
+ extern void output_get_pc_thunk(void);
+ extern void output_module( DLLSPEC *spec );
+ extern void output_stubs( DLLSPEC *spec );
+diff --git a/tools/winebuild/spec16.c b/tools/winebuild/spec16.c
+index a52c03aaa6a..1c8cf341402 100644
+--- a/tools/winebuild/spec16.c
++++ b/tools/winebuild/spec16.c
+@@ -824,6 +824,7 @@ void output_spec16_file( DLLSPEC *spec16 )
+     output_module16( spec16 );
+     output_stubs( spec16 );
+     output_exports( spec32 );
++    output_relay_data( spec32 );
+     output_imports( spec16 );
+     if (!strcmp( spec16->dll_name, "kernel" )) output_asm_relays16();
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index af7af0dc7b9..69c33c79cb9 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -516,36 +516,10 @@ void output_exports( DLLSPEC *spec )
+         }
+     }
+ 
+-    /* output relays */
+-
+-    if (needs_relay)
+-    {
+-        if (target_platform == PLATFORM_WINDOWS)
+-        {
+-            output( "\t.data\n" );
+-            output( "\t.align %d\n", get_alignment(get_ptr_size()) );
+-        }
+-        else
+-        {
+-            output( "\t.align %d\n", get_alignment(get_ptr_size()) );
+-            output( ".L__wine_spec_exports_end:\n" );
+-        }
+-
+-        output( ".L__wine_spec_relay_descr:\n" );
+-        output( "\t%s 0xdeb90002\n", get_asm_ptr_keyword() );  /* magic */
+-        output( "\t%s 0\n", get_asm_ptr_keyword() );           /* relay func */
+-        output( "\t%s 0\n", get_asm_ptr_keyword() );           /* private data */
+-        output( "\t%s __wine_spec_relay_entry_points\n", get_asm_ptr_keyword() );
+-        output( "\t%s .L__wine_spec_relay_entry_point_offsets\n", get_asm_ptr_keyword() );
+-        output( "\t%s .L__wine_spec_relay_args_string\n", get_asm_ptr_keyword() );
+-
+-        output_relay_debug( spec );
+-    }
+-    else if (target_platform != PLATFORM_WINDOWS)
++    if (target_platform != PLATFORM_WINDOWS)
+     {
+-            output( "\t.align %d\n", get_alignment(get_ptr_size()) );
+-            output( ".L__wine_spec_exports_end:\n" );
+-            output( "\t%s 0\n", get_asm_ptr_keyword() );
++        output( "\t.align %d\n", get_alignment(get_ptr_size()) );
++        output( ".L__wine_spec_exports_end:\n" );
+     }
+ 
+     /* output import thunks */
+@@ -590,6 +564,31 @@ void output_exports( DLLSPEC *spec )
+ }
+ 
+ 
++/*******************************************************************
++ *         output_relay_data
++ *
++ * Output the delay data for a Win32 module.
++ */
++void output_relay_data( DLLSPEC *spec )
++{
++    if (!has_relays( spec )) return;
++
++    /* output relay data */
++
++    output( "\t%s\n", get_asm_data_section() );
++    output( "\t.align %d\n", get_alignment(get_ptr_size()) );
++    output( ".L__wine_spec_relay_descr:\n" );
++    output( "\t%s 0xdeb90002\n", get_asm_ptr_keyword() );  /* magic */
++    output( "\t%s 0\n", get_asm_ptr_keyword() );           /* relay func */
++    output( "\t%s 0\n", get_asm_ptr_keyword() );           /* private data */
++    output( "\t%s __wine_spec_relay_entry_points\n", get_asm_ptr_keyword() );
++    output( "\t%s .L__wine_spec_relay_entry_point_offsets\n", get_asm_ptr_keyword() );
++    output( "\t%s .L__wine_spec_relay_args_string\n", get_asm_ptr_keyword() );
++
++    output_relay_debug( spec );
++}
++
++
+ /*******************************************************************
+  *         output_module
+  *
+@@ -810,6 +809,7 @@ void output_spec32_file( DLLSPEC *spec )
+     output_stubs( spec );
+     output_exports( spec );
+     output_imports( spec );
++    output_relay_data( spec );
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+     output_resources( spec );
+ 
+
+From 9e6a1849cd9529853115f99fd2fafea1801977fb Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 17 Jun 2020 17:54:29 +0200
+Subject: [PATCH 14/32] winebuild: Output .edata section header.
+
+---
+ tools/winebuild/spec32.c | 32 ++++++++++++++++++++++++++------
+ 1 file changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 69c33c79cb9..cecb182b9de 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -155,7 +155,7 @@ static void output_data_directories( const char *names[16] )
+         if (names[i])
+         {
+             output_rva( "%s", names[i] );
+-            output( "\t.long %s_end - %s\n", names[i], names[i] );
++            output_size( names[i] );
+         }
+         else output( "\t.long 0,0\n" );
+     }
+@@ -390,13 +390,14 @@ void output_exports( DLLSPEC *spec )
+     int needs_imports = 0;
+     int needs_relay = has_relays( spec );
+     int nr_exports = spec->base <= spec->limit ? spec->limit - spec->base + 1 : 0;
++    unsigned int page_size = get_page_size();
+     const char *name;
+ 
+     if (!nr_exports) return;
+ 
+     output( "\n/* export table */\n\n" );
+     output( "\t%s\n", get_asm_export_section() );
+-    output( "\t.align %d\n", get_alignment(4) );
++    output( "\t.align %d, 0\n", page_size );
+     output( ".L__wine_spec_exports:\n" );
+ 
+     /* export directory header */
+@@ -518,8 +519,8 @@ void output_exports( DLLSPEC *spec )
+ 
+     if (target_platform != PLATFORM_WINDOWS)
+     {
+-        output( "\t.align %d\n", get_alignment(get_ptr_size()) );
+         output( ".L__wine_spec_exports_end:\n" );
++        output( "\t.align %d, 0\n", page_size );
+     }
+ 
+     /* output import thunks */
+@@ -596,11 +597,13 @@ void output_relay_data( DLLSPEC *spec )
+  */
+ void output_module( DLLSPEC *spec )
+ {
+-    int machine = 0;
++    int machine = 0, has_exports = (spec->base <= spec->limit ? 1 : 0);
+     unsigned int page_size = get_page_size();
+     const char *data_dirs[16] = { NULL };
+     unsigned int nb_sections = 2;
+ 
++    if (has_exports) nb_sections++;
++
+     /* Reserve some space for the PE header */
+ 
+     switch (target_platform)
+@@ -740,7 +743,7 @@ void output_module( DLLSPEC *spec )
+     output( "\t.long 0\n" );              /* LoaderFlags */
+     output( "\t.long 16\n" );             /* NumberOfRvaAndSizes */
+ 
+-    if (spec->base <= spec->limit)
++    if (has_exports)
+         data_dirs[0] = ".L__wine_spec_exports";   /* DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT] */
+     if (has_imports())
+         data_dirs[1] = ".L__wine_spec_imports";   /* DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT] */
+@@ -777,6 +780,23 @@ void output_module( DLLSPEC *spec )
+     output( "\t.long 0xc0000040\n"                     /* Characteristics */
+             /* CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE */ );
+ 
++    if (has_exports)
++    {
++        /* .edata section */
++        output( "\t.ascii \".edata\"\n" );                 /* Name */
++        output( "\t.align 8, 0\n" );
++        output_size( ".L__wine_spec_exports" );            /* VirtualSize */
++        output_rva( "%s", ".L__wine_spec_exports" );       /* VirtualAddress */
++        output_size( ".L__wine_spec_exports" );            /* SizeOfRawData */
++        output_rva( "%s", ".L__wine_spec_exports" );       /* PointerToRawData */
++        output( "\t.long 0\n" );                           /* PointerToRelocations */
++        output( "\t.long 0\n" );                           /* PointerToLinenumbers */
++        output( "\t.short 0\n" );                          /* NumberOfRelocations */
++        output( "\t.short 0\n" );                          /* NumberOfLinenumbers */
++        output( "\t.long 0x40000040\n"                     /* Characteristics */
++                /* CNT_INITIALIZED_DATA|MEM_READ */ );
++    }
++
+     output( "\t.align %u, 0\n", page_size );
+     output( "\t.L__wine_spec_pe_end:\n" );
+ }
+@@ -794,6 +814,7 @@ void output_spec32_file( DLLSPEC *spec )
+     open_output_file();
+     output_standard_file_header();
+     output_module( spec );
++    output_exports( spec );
+ 
+     if (target_platform != PLATFORM_WINDOWS)
+     {
+@@ -807,7 +828,6 @@ void output_spec32_file( DLLSPEC *spec )
+     }
+ 
+     output_stubs( spec );
+-    output_exports( spec );
+     output_imports( spec );
+     output_relay_data( spec );
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+
+From e70de0fcd8afb6dc1edb65c5e614f4d98538f162 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 17 Jun 2020 17:56:25 +0200
+Subject: [PATCH 15/32] winebuild: Output .idata section header.
+
+---
+ tools/winebuild/build.h  |  1 +
+ tools/winebuild/import.c | 26 ++++++++++++++++++--------
+ tools/winebuild/spec32.c | 20 +++++++++++++++++++-
+ tools/winebuild/utils.c  | 10 ++++++++++
+ 4 files changed, 48 insertions(+), 9 deletions(-)
+
+diff --git a/tools/winebuild/build.h b/tools/winebuild/build.h
+index b5a45a10968..f7c010c80a1 100644
+--- a/tools/winebuild/build.h
++++ b/tools/winebuild/build.h
+@@ -287,6 +287,7 @@ extern const char *get_asm_ptr_keyword(void);
+ extern const char *get_asm_string_keyword(void);
+ extern const char *get_asm_data_section(void);
+ extern const char *get_asm_export_section(void);
++extern const char *get_asm_import_section(void);
+ extern const char *get_asm_rodata_section(void);
+ extern const char *get_asm_rsrc_section(void);
+ extern const char *get_asm_string_section(void);
+diff --git a/tools/winebuild/import.c b/tools/winebuild/import.c
+index 0719025bee9..e210b0a360e 100644
+--- a/tools/winebuild/import.c
++++ b/tools/winebuild/import.c
+@@ -796,8 +796,8 @@ static void output_immediate_imports(void)
+     /* main import header */
+ 
+     output( "\n/* import table */\n" );
+-    output( "\n\t.data\n" );
+-    output( "\t.align %d\n", get_alignment(4) );
++    output( "\t%s\n", get_asm_import_section() );
++    output( "\t.align %d, 0\n", get_alignment(4) );
+     output( ".L__wine_spec_imports:\n" );
+ 
+     /* list of dlls */
+@@ -818,7 +818,7 @@ static void output_immediate_imports(void)
+     output( "\t.long 0\n" );     /* Name */
+     output( "\t.long 0\n" );     /* FirstThunk */
+ 
+-    output( "\n\t.align %d\n", get_alignment(get_ptr_size()) );
++    output( "\n\t.align %d, 0\n", get_alignment(get_ptr_size()) );
+     /* output the names twice, once for OriginalFirstThunk and once for FirstThunk */
+     for (i = 0; i < 2; i++)
+     {
+@@ -855,7 +855,7 @@ static void output_immediate_imports(void)
+         {
+             struct import_func *func = &import->imports[j];
+             if (!func->name) continue;
+-            output( "\t.align %d\n", get_alignment(2) );
++            output( "\t.align %d, 0\n", get_alignment(2) );
+             output( ".L__wine_spec_import_data_%s_%s:\n", import->c_name, func->name );
+             output( "\t.short %d\n", func->hint );
+             output( "\t%s \"%s\"\n", get_asm_string_keyword(), func->name );
+@@ -906,8 +906,8 @@ static void output_delayed_imports( const DLLSPEC *spec )
+     if (list_empty( &dll_delayed )) return;
+ 
+     output( "\n/* delayed imports */\n\n" );
+-    output( "\t.data\n" );
+-    output( "\t.align %d\n", get_alignment(get_ptr_size()) );
++    output( "\t%s\n", get_asm_import_section() );
++    output( "\t.align %d, 0\n", get_alignment(get_ptr_size()) );
+     output( "%s\n", asm_globl("__wine_spec_delay_imports") );
+ 
+     /* list of dlls */
+@@ -1244,8 +1244,8 @@ static void output_external_link_imports( DLLSPEC *spec )
+     }
+ 
+     output( "\n/* external link thunks */\n\n" );
+-    output( "\t.data\n" );
+-    output( "\t.align %d\n", get_alignment(get_ptr_size()) );
++    output( "\t%s\n", get_asm_import_section() );
++    output( "\t.align %d, 0\n", get_alignment(get_ptr_size()) );
+     output( ".L__wine_spec_external_links:\n" );
+     for (i = 0; i < ext_link_imports.count; i++)
+         output( "\t%s %s\n", get_asm_ptr_keyword(), asm_name(ext_link_imports.str[i]) );
+@@ -1394,12 +1394,22 @@ void output_stubs( DLLSPEC *spec )
+ /* output the import and delayed import tables of a Win32 module */
+ void output_imports( DLLSPEC *spec )
+ {
++    unsigned int page_size = get_page_size();
+     if (target_platform == PLATFORM_WINDOWS) return;
++
++    output( "\t%s\n", get_asm_import_section() );
++    output( "\t.align %d, 0\n", page_size );
++    output( ".L__wine_spec_idata:\n" );
++
+     output_immediate_imports();
+     output_delayed_imports( spec );
+     output_immediate_import_thunks();
+     output_delayed_import_thunks( spec );
+     output_external_link_imports( spec );
++
++    output( "\t%s\n", get_asm_import_section() );
++    output( ".L__wine_spec_idata_end:\n" );
++    output( "\t.align %d\n", page_size );
+ }
+ 
+ /* create a new asm temp file */
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index cecb182b9de..f3ee846dae5 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -603,6 +603,7 @@ void output_module( DLLSPEC *spec )
+     unsigned int nb_sections = 2;
+ 
+     if (has_exports) nb_sections++;
++    if (has_imports()) nb_sections++;
+ 
+     /* Reserve some space for the PE header */
+ 
+@@ -797,6 +798,23 @@ void output_module( DLLSPEC *spec )
+                 /* CNT_INITIALIZED_DATA|MEM_READ */ );
+     }
+ 
++    if (has_imports())
++    {
++        /* .idata section */
++        output( "\t.ascii \".idata\"\n" );                 /* Name */
++        output( "\t.align 8, 0\n" );
++        output_size( ".L__wine_spec_idata" );            /* VirtualSize */
++        output_rva( "%s", ".L__wine_spec_idata" );       /* VirtualAddress */
++        output_size( ".L__wine_spec_idata" );            /* SizeOfRawData */
++        output_rva( "%s", ".L__wine_spec_idata" );       /* PointerToRawData */
++        output( "\t.long 0\n" );                           /* PointerToRelocations */
++        output( "\t.long 0\n" );                           /* PointerToLinenumbers */
++        output( "\t.short 0\n" );                          /* NumberOfRelocations */
++        output( "\t.short 0\n" );                          /* NumberOfLinenumbers */
++        output( "\t.long 0xc0000040\n"                     /* Characteristics */
++                /* CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE */ );
++    }
++
+     output( "\t.align %u, 0\n", page_size );
+     output( "\t.L__wine_spec_pe_end:\n" );
+ }
+@@ -815,6 +833,7 @@ void output_spec32_file( DLLSPEC *spec )
+     output_standard_file_header();
+     output_module( spec );
+     output_exports( spec );
++    output_imports( spec );
+ 
+     if (target_platform != PLATFORM_WINDOWS)
+     {
+@@ -828,7 +847,6 @@ void output_spec32_file( DLLSPEC *spec )
+     }
+ 
+     output_stubs( spec );
+-    output_imports( spec );
+     output_relay_data( spec );
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+     output_resources( spec );
+diff --git a/tools/winebuild/utils.c b/tools/winebuild/utils.c
+index 5a102d80a1e..bf8e395dcc8 100644
+--- a/tools/winebuild/utils.c
++++ b/tools/winebuild/utils.c
+@@ -1258,6 +1258,16 @@ const char *get_asm_export_section(void)
+     }
+ }
+ 
++const char *get_asm_import_section(void)
++{
++    switch (target_platform)
++    {
++    case PLATFORM_APPLE:   return ".data";
++    case PLATFORM_WINDOWS: return ".section .idata";
++    default:               return ".section .data";
++    }
++}
++
+ const char *get_asm_rodata_section(void)
+ {
+     switch (target_platform)
+
+From 9a4beeed5d470f5ab995a6920ab710bf87e1af05 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 11 Jun 2020 20:16:48 +0200
+Subject: [PATCH 16/32] winebuild: Output .rsrc section header.
+
+---
+ tools/winebuild/res32.c  |  7 ++++---
+ tools/winebuild/spec32.c | 20 +++++++++++++++++++-
+ 2 files changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/tools/winebuild/res32.c b/tools/winebuild/res32.c
+index bd55bb2fa5c..8e1dca4d534 100644
+--- a/tools/winebuild/res32.c
++++ b/tools/winebuild/res32.c
+@@ -427,6 +427,7 @@ static inline void output_res_dir( unsigned int nb_names, unsigned int nb_ids )
+ /* output the resource definitions */
+ void output_resources( DLLSPEC *spec )
+ {
++    unsigned int page_size = get_page_size();
+     int k, nb_id_types;
+     unsigned int i, n;
+     struct res_tree *tree;
+@@ -442,7 +443,7 @@ void output_resources( DLLSPEC *spec )
+ 
+     output( "\n/* resources */\n\n" );
+     output( "\t%s\n", get_asm_rsrc_section() );
+-    output( "\t.align %d\n", get_alignment(get_ptr_size()) );
++    output( "\t.align %u, 0\n", page_size );
+     output( ".L__wine_spec_resources:\n" );
+ 
+     for (i = nb_id_types = 0, type = tree->types; i < tree->nb_types; i++, type++)
+@@ -494,7 +495,7 @@ void output_resources( DLLSPEC *spec )
+ 
+     for (i = 0, res = spec->resources; i < spec->nb_resources; i++, res++)
+     {
+-        output( "\n\t.align %d\n", get_alignment(4) );
++        output( "\n\t.align %d, 0\n", get_alignment(4) );
+         output( ".L__wine_spec_res_%d:\n", i );
+         dump_res_data( res );
+     }
+@@ -502,7 +503,7 @@ void output_resources( DLLSPEC *spec )
+     if (target_platform != PLATFORM_WINDOWS)
+     {
+         output( ".L__wine_spec_resources_end:\n" );
+-        output( "\t.byte 0\n" );
++        output( "\t.align %u, 0\n", page_size );
+     }
+     free_resource_tree( tree );
+ }
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index f3ee846dae5..e7dffa1cb60 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -604,6 +604,7 @@ void output_module( DLLSPEC *spec )
+ 
+     if (has_exports) nb_sections++;
+     if (has_imports()) nb_sections++;
++    if (spec->nb_resources) nb_sections++;
+ 
+     /* Reserve some space for the PE header */
+ 
+@@ -815,6 +816,23 @@ void output_module( DLLSPEC *spec )
+                 /* CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE */ );
+     }
+ 
++    if (spec->nb_resources)
++    {
++        /* .rsrc section */
++        output( "\t.ascii \".rsrc\"\n" );              /* Name */
++        output( "\t.align 8, 0\n" );
++        output_size( ".L__wine_spec_resources" );      /* VirtualSize */
++        output_rva( "%s", ".L__wine_spec_resources" ); /* VirtualAddress */
++        output_size( ".L__wine_spec_resources" );      /* SizeOfRawData */
++        output_rva( "%s", ".L__wine_spec_resources" ); /* PointerToRawData */
++        output( "\t.long 0\n" );                       /* PointerToRelocations */
++        output( "\t.long 0\n" );                       /* PointerToLinenumbers */
++        output( "\t.short 0\n" );                      /* NumberOfRelocations */
++        output( "\t.short 0\n" );                      /* NumberOfLinenumbers */
++        output( "\t.long 0xc0000040\n"                 /* Characteristics */
++                /* CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE */ );
++    }
++
+     output( "\t.align %u, 0\n", page_size );
+     output( "\t.L__wine_spec_pe_end:\n" );
+ }
+@@ -834,6 +852,7 @@ void output_spec32_file( DLLSPEC *spec )
+     output_module( spec );
+     output_exports( spec );
+     output_imports( spec );
++    output_resources( spec );
+ 
+     if (target_platform != PLATFORM_WINDOWS)
+     {
+@@ -849,7 +868,6 @@ void output_spec32_file( DLLSPEC *spec )
+     output_stubs( spec );
+     output_relay_data( spec );
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+-    output_resources( spec );
+ 
+     if (target_platform != PLATFORM_WINDOWS)
+     {
+
+From f26c87bd601fc6a329dc8b1b65e5eebf3b6ccc07 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 18 Jun 2020 02:06:38 +0200
+Subject: [PATCH 17/32] winebuild: Output .rodata section header.
+
+---
+ tools/winebuild/build.h  |  3 ++
+ tools/winebuild/import.c | 17 +++++++-
+ tools/winebuild/spec16.c |  2 +
+ tools/winebuild/spec32.c | 94 +++++++++++++++++++++++++++++++---------
+ 4 files changed, 93 insertions(+), 23 deletions(-)
+
+diff --git a/tools/winebuild/build.h b/tools/winebuild/build.h
+index f7c010c80a1..a3ed4588f30 100644
+--- a/tools/winebuild/build.h
++++ b/tools/winebuild/build.h
+@@ -301,10 +301,13 @@ extern void read_undef_symbols( DLLSPEC *spec, char **argv );
+ extern void resolve_imports( DLLSPEC *spec );
+ extern int is_undefined( const char *name );
+ extern int has_imports(void);
++extern int has_stubs( const DLLSPEC *spec );
++extern void output_relay_rodata( DLLSPEC *spec );
+ extern void output_relay_data( DLLSPEC *spec );
+ extern void output_get_pc_thunk(void);
+ extern void output_module( DLLSPEC *spec );
+ extern void output_stubs( DLLSPEC *spec );
++extern void output_stubs_rodata( DLLSPEC *spec );
+ extern void output_imports( DLLSPEC *spec );
+ extern void output_static_lib( DLLSPEC *spec, char **argv );
+ extern void output_exports( DLLSPEC *spec );
+diff --git a/tools/winebuild/import.c b/tools/winebuild/import.c
+index e210b0a360e..63b76038a3d 100644
+--- a/tools/winebuild/import.c
++++ b/tools/winebuild/import.c
+@@ -457,7 +457,7 @@ static void add_undef_import( const char *name, int is_ordinal )
+ }
+ 
+ /* check if the spec file exports any stubs */
+-static int has_stubs( const DLLSPEC *spec )
++int has_stubs( const DLLSPEC *spec )
+ {
+     int i;
+     for (i = 0; i < spec->nb_entry_points; i++)
+@@ -1373,8 +1373,21 @@ void output_stubs( DLLSPEC *spec )
+         output_cfi( ".cfi_endproc" );
+         output_function_size( name );
+     }
++}
++
++/*******************************************************************
++ *         output_stubs_rodata
++ *
++ * Output the read-only data used by stub entry points
++ */
++void output_stubs_rodata( DLLSPEC *spec )
++{
++    const char *name, *exp_name;
++    int i;
++
++    if (!has_stubs( spec )) return;
+ 
+-    output( "\t%s\n", get_asm_string_section() );
++    output( "\t%s\n", get_asm_rodata_section() );
+     output( ".L__wine_spec_file_name:\n" );
+     output( "\t%s \"%s\"\n", get_asm_string_keyword(), spec->file_name );
+     for (i = 0; i < spec->nb_entry_points; i++)
+diff --git a/tools/winebuild/spec16.c b/tools/winebuild/spec16.c
+index 1c8cf341402..f66dcfd9192 100644
+--- a/tools/winebuild/spec16.c
++++ b/tools/winebuild/spec16.c
+@@ -823,7 +823,9 @@ void output_spec16_file( DLLSPEC *spec16 )
+     output_module( spec32 );
+     output_module16( spec16 );
+     output_stubs( spec16 );
++    output_stubs_rodata( spec16 );
+     output_exports( spec32 );
++    output_relay_rodata( spec32 );
+     output_relay_data( spec32 );
+     output_imports( spec16 );
+     if (!strcmp( spec16->dll_name, "kernel" )) output_asm_relays16();
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index e7dffa1cb60..d8677f7517f 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -208,27 +208,6 @@ static void output_relay_debug( DLLSPEC *spec )
+ {
+     int i;
+ 
+-    /* first the table of entry point offsets */
+-
+-    output( "\t%s\n", get_asm_rodata_section() );
+-    output( "\t.align %d\n", get_alignment(4) );
+-    output( ".L__wine_spec_relay_entry_point_offsets:\n" );
+-
+-    for (i = spec->base; i <= spec->limit; i++)
+-    {
+-        ORDDEF *odp = spec->ordinals[i];
+-
+-        if (needs_relay( odp ))
+-            output( "\t.long .L__wine_spec_relay_entry_point_%d-__wine_spec_relay_entry_points\n", i );
+-        else
+-            output( "\t.long 0\n" );
+-    }
+-
+-    /* then the strings of argument types */
+-
+-    output( ".L__wine_spec_relay_args_string:\n" );
+-    output( "\t%s \"%s\"\n", get_asm_string_keyword(), build_args_string( spec ));
+-
+     /* then the relay thunks */
+ 
+     output( "\t.text\n" );
+@@ -565,6 +544,60 @@ void output_exports( DLLSPEC *spec )
+ }
+ 
+ 
++/*******************************************************************
++ *         output_rodata
++ *
++ * Output the read-only data for a Win32 module.
++ */
++void output_rodata( DLLSPEC *spec )
++{
++    unsigned int page_size = get_page_size();
++
++    output( "\t%s\n", get_asm_rodata_section() );
++    output( "\t.align %d, 0\n", page_size );
++    output( ".L__wine_spec_rodata:\n" );
++
++    if (has_relays( spec ))
++        output_relay_rodata( spec );
++
++    if (has_stubs( spec ))
++        output_stubs_rodata( spec );
++
++    output( ".L__wine_spec_rodata_end:\n" );
++}
++
++
++/*******************************************************************
++ *         output_relay_rodata
++ *
++ * Output the delay read-only data for a Win32 module.
++ */
++void output_relay_rodata( DLLSPEC *spec )
++{
++    int i;
++
++    /* first the table of entry point offsets */
++
++    output( "\t.align %d\n", get_alignment(4) );
++    output( ".L__wine_spec_relay_entry_point_offsets:\n" );
++
++    for (i = spec->base; i <= spec->limit; i++)
++    {
++        ORDDEF *odp = spec->ordinals[i];
++
++        if (needs_relay( odp ))
++            output( "\t.long .L__wine_spec_relay_entry_point_%d-__wine_spec_relay_entry_points\n", i );
++        else
++            output( "\t.long 0\n" );
++    }
++
++    /* then the strings of argument types */
++
++    output( ".L__wine_spec_relay_args_string:\n" );
++    output( "\t%s \"%s\"\n", get_asm_string_keyword(), build_args_string( spec ));
++}
++
++
+ /*******************************************************************
+  *         output_relay_data
+  *
+@@ -605,6 +638,7 @@ void output_module( DLLSPEC *spec )
+     if (has_exports) nb_sections++;
+     if (has_imports()) nb_sections++;
+     if (spec->nb_resources) nb_sections++;
++    if ((has_stubs( spec ) || has_relays( spec ))) nb_sections++;
+ 
+     /* Reserve some space for the PE header */
+ 
+@@ -833,6 +867,23 @@ void output_module( DLLSPEC *spec )
+                 /* CNT_INITIALIZED_DATA|MEM_READ|MEM_WRITE */ );
+     }
+ 
++    if (has_stubs( spec ) || has_relays( spec ))
++    {
++        /* .rodata section */
++        output( "\t.ascii \".rodata\"\n" );              /* Name */
++        output( "\t.align 8, 0\n" );
++        output_size( ".L__wine_spec_rodata" );         /* VirtualSize */
++        output_rva( "%s", ".L__wine_spec_rodata" );    /* VirtualAddress */
++        output_size( ".L__wine_spec_rodata" );         /* SizeOfRawData */
++        output_rva( "%s", ".L__wine_spec_rodata" );    /* PointerToRawData */
++        output( "\t.long 0\n" );                       /* PointerToRelocations */
++        output( "\t.long 0\n" );                       /* PointerToLinenumbers */
++        output( "\t.short 0\n" );                      /* NumberOfRelocations */
++        output( "\t.short 0\n" );                      /* NumberOfLinenumbers */
++        output( "\t.long 0x40000040\n"                 /* Characteristics */
++                /* CNT_INITIALIZED_DATA|MEM_READ */ );
++    }
++
+     output( "\t.align %u, 0\n", page_size );
+     output( "\t.L__wine_spec_pe_end:\n" );
+ }
+@@ -853,6 +904,7 @@ void output_spec32_file( DLLSPEC *spec )
+     output_exports( spec );
+     output_imports( spec );
+     output_resources( spec );
++    output_rodata( spec );
+ 
+     if (target_platform != PLATFORM_WINDOWS)
+     {
+
+From b37812dd3fecac54b7c4e66ff3786f9ed6df6d27 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 09:10:55 +0200
+Subject: [PATCH 18/32] ntdll: Only relocate module header if necessary.
+
+With a bit of chance, and with -Wl,--image-base tweaking, the so file
+can be loaded at the right place and the module headers will not have to
+be aligned.
+---
+ dlls/ntdll/unix/loader.c | 28 +++++++++++++++++++++-------
+ 1 file changed, 21 insertions(+), 7 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 0346addf8aa..031260ce1cb 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -174,6 +174,7 @@ static inline void fixup_rva_ptrs( void *array, BYTE *base, unsigned int count )
+ /* fixup an array of RVAs by adding the specified delta */
+ static inline void fixup_rva_dwords( DWORD *ptr, int delta, unsigned int count )
+ {
++    if (!delta) return;
+     for ( ; count; count--, ptr++) if (*ptr) *ptr += delta;
+ }
+ 
+@@ -181,6 +182,7 @@ static inline void fixup_rva_dwords( DWORD *ptr, int delta, unsigned int count )
+ /* fixup an array of name/ordinal RVAs by adding the specified delta */
+ static inline void fixup_rva_names( UINT_PTR *ptr, int delta )
+ {
++    if (!delta) return;
+     for ( ; *ptr; ptr++) if (!(*ptr & IMAGE_ORDINAL_FLAG)) *ptr += delta;
+ }
+ 
+@@ -632,17 +634,27 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     IMAGE_DOS_HEADER *dos;
+     IMAGE_NT_HEADERS *nt;
+     IMAGE_SECTION_HEADER *sec;
+-    BYTE *addr = (BYTE *)module;
++    BYTE *addr = (BYTE *)module, *tmp;
+     DWORD code_end;
+     int delta;
+     unsigned int i;
+     DWORD size = nt_descr->OptionalHeader.SizeOfHeaders;
+ 
+-    delta = (const BYTE *)nt_descr->OptionalHeader.ImageBase - addr;
++    if ((delta = (const BYTE *)nt_descr->OptionalHeader.ImageBase - addr))
++    {
++        TRACE("aligning module from %p-%p to %p-%p\n", (const BYTE *)nt_descr->OptionalHeader.ImageBase,
++            (const BYTE *)nt_descr->OptionalHeader.ImageBase + size, (BYTE *)module, (const BYTE *)module + size);
++
++        if ((tmp = wine_anon_mmap( NULL, size, PROT_READ | PROT_WRITE, 0 )) == MAP_FAILED) return STATUS_NO_MEMORY;
++        memmove(tmp, (const BYTE *)nt_descr->OptionalHeader.ImageBase, size);
+ 
+-    if (wine_anon_mmap( addr, size, PROT_READ | PROT_WRITE, MAP_FIXED ) != addr) return STATUS_NO_MEMORY;
++        if (wine_anon_mmap( addr, size, PROT_READ | PROT_WRITE, MAP_FIXED ) != addr) return STATUS_NO_MEMORY;
+ 
+-    memmove(addr, (const BYTE *)nt_descr->OptionalHeader.ImageBase, size);
++        memmove(addr, tmp, size);
++        munmap(tmp, size);
++    }
++    else if (remap_writable( addr, size ))
++        return STATUS_NO_MEMORY;
+ 
+     dos = (IMAGE_DOS_HEADER *)addr;
+     nt  = (IMAGE_NT_HEADERS *)((BYTE *)dos + dos->e_lfanew);
+@@ -668,7 +680,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ 
+     /* build the NT headers */
+ 
+-    nt->OptionalHeader.ImageBase = (ULONG_PTR)addr;
++    if (delta) nt->OptionalHeader.ImageBase = (ULONG_PTR)addr;
+ 
+     fixup_rva_dwords( &nt->OptionalHeader.AddressOfEntryPoint, delta, 1 );
+     fixup_rva_dwords( &nt->OptionalHeader.BaseOfCode, delta, 1 );
+@@ -864,9 +876,11 @@ static NTSTATUS dlopen_dll( const char *so_name, void **ret_module )
+     struct builtin_module *builtin;
+     void *module, *handle;
+     const IMAGE_NT_HEADERS *nt;
++    BOOL mapped = FALSE;
+ 
+     callback_module = (void *)1;
+-    handle = dlopen( so_name, RTLD_NOW );
++    if ((handle = dlopen( so_name, RTLD_NOW | RTLD_NOLOAD ))) mapped = TRUE;
++    else handle = dlopen( so_name, RTLD_NOW );
+     if (!handle)
+     {
+         WARN( "failed to load .so lib %s: %s\n", debugstr_a(so_name), dlerror() );
+@@ -885,7 +899,7 @@ static NTSTATUS dlopen_dll( const char *so_name, void **ret_module )
+         module = (HMODULE)(((UINT_PTR)module + 0xffff) & ~0xffff);
+         LIST_FOR_EACH_ENTRY( builtin, &builtin_modules, struct builtin_module, entry )
+             if (builtin->module == module) goto already_loaded;
+-        if (map_so_dll( nt, module ))
++        if (!mapped && map_so_dll( nt, module ))
+         {
+             dlclose( handle );
+             return STATUS_NO_MEMORY;
+
+From 55d6e603481af4acc6cb0a5d6a890270181a0f1d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 09:20:59 +0200
+Subject: [PATCH 19/32] winebuild: Output module in the reserved region.
+
+With a bit of chance, and with -Wl,--image-base tweaking, the so file
+can be loaded at the right place and the module headers will not have to
+be aligned.
+---
+ dlls/ntdll/unix/loader.c |  2 +-
+ tools/winebuild/spec32.c | 25 +++++++++----------------
+ tools/winebuild/utils.c  | 29 +++++++++++++++++++----------
+ 3 files changed, 29 insertions(+), 27 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 031260ce1cb..7c7589a6bfa 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -670,7 +670,7 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+         fixup_rva_dwords( &sec[i].VirtualAddress, delta, 1 );
+         fixup_rva_dwords( &sec[i].PointerToRawData, delta, 1 );
+ 
+-        if (memcmp( sec[i].Name, ".text", sizeof(".text" )) && code_end > sec[i].VirtualAddress)
++        if (!memcmp( sec[i].Name, ".data", sizeof(".data" )))
+             code_end = sec[i].VirtualAddress;
+ 
+         if ((sec[i].Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) &&
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index d8677f7517f..9c536bfe912 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -648,16 +648,9 @@ void output_module( DLLSPEC *spec )
+         return;  /* nothing to do */
+     case PLATFORM_APPLE:
+         output( "\t.text\n" );
+-        output( "\t.align %d\n", get_alignment(page_size) );
+-        output( "\t.globl %s\n", asm_name("__wine_spec_module") );
+-        output( "%s:\n", asm_name("__wine_spec_module") );
+-        output( "\t.space 65536\n" );
+         break;
+     case PLATFORM_SOLARIS:
+         output( "\n\t.section \".text\",\"ax\"\n" );
+-        output( "\t.globl %s\n", asm_name("__wine_spec_module") );
+-        output( "%s:\n", asm_name("__wine_spec_module") );
+-        output( "\t.skip %u\n", 65536 + page_size );
+         break;
+     default:
+         switch(target_cpu)
+@@ -665,29 +658,26 @@ void output_module( DLLSPEC *spec )
+         case CPU_x86:
+         case CPU_x86_64:
+             output( "\n\t.section \".init\",\"ax\"\n" );
+-            output( "\tjmp 1f\n" );
++            output( "\tjmp .L__wine_spec_text\n" );
+             break;
+         case CPU_ARM:
+             output( "\n\t.section \".text\",\"ax\"\n" );
+-            output( "\tb 1f\n" );
++            output( "\tb .L__wine_spec_text\n" );
+             break;
+         case CPU_ARM64:
+         case CPU_POWERPC:
+             output( "\n\t.section \".init\",\"ax\"\n" );
+-            output( "\tb 1f\n" );
++            output( "\tb .L__wine_spec_text\n" );
+             break;
+         }
+-        output( "\t.globl %s\n", asm_name("__wine_spec_module") );
+-        output( "%s:\n", asm_name("__wine_spec_module") );
+-        output( "\t.skip %u\n", 65536 + page_size );
+-        output( "1:\n" );
+         break;
+     }
+ 
+     /* Output the DOS header */
+ 
+-    output( "\n\t.data\n" );
+-    output( "\t.align %d\n", get_alignment(get_ptr_size()) );
++    output( "\t.align %u\n", page_size );
++    output( "\t.globl %s\n", asm_name("__wine_spec_module") );
++    output( "%s:\n", asm_name("__wine_spec_module") );
+     output( ".L__wine_spec_dos:\n" );
+     output( "\t.short 0x5a4d\n" );       /* e_magic */
+     output( "\t.short 0x90\n" );         /* e_cblp */
+@@ -886,6 +876,9 @@ void output_module( DLLSPEC *spec )
+ 
+     output( "\t.align %u, 0\n", page_size );
+     output( "\t.L__wine_spec_pe_end:\n" );
++
++    output( "\t.org %s + 0x10000\n", asm_name("__wine_spec_module") );
++    output_function_size( asm_name("__wine_spec_module") );
+ }
+ 
+ 
+diff --git a/tools/winebuild/utils.c b/tools/winebuild/utils.c
+index bf8e395dcc8..74c98c02801 100644
+--- a/tools/winebuild/utils.c
++++ b/tools/winebuild/utils.c
+@@ -1238,6 +1238,18 @@ const char *get_asm_string_keyword(void)
+     }
+ }
+ 
++static const char *get_asm_wine_section(void)
++{
++    switch (target_platform)
++    {
++    case PLATFORM_APPLE:   return ".text";
++    case PLATFORM_SOLARIS: return ".text";
++    default:
++        if (target_cpu == CPU_ARM) return ".section .text";
++        return ".section .init";
++    }
++}
++
+ const char *get_asm_data_section(void)
+ {
+     switch (target_platform)
+@@ -1252,9 +1264,8 @@ const char *get_asm_export_section(void)
+ {
+     switch (target_platform)
+     {
+-    case PLATFORM_APPLE:   return ".data";
+     case PLATFORM_WINDOWS: return ".section .edata";
+-    default:               return ".section .data";
++    default: return get_asm_wine_section();
+     }
+ }
+ 
+@@ -1262,9 +1273,8 @@ const char *get_asm_import_section(void)
+ {
+     switch (target_platform)
+     {
+-    case PLATFORM_APPLE:   return ".data";
+     case PLATFORM_WINDOWS: return ".section .idata";
+-    default:               return ".section .data";
++    default: return get_asm_wine_section();
+     }
+ }
+ 
+@@ -1272,8 +1282,8 @@ const char *get_asm_rodata_section(void)
+ {
+     switch (target_platform)
+     {
+-    case PLATFORM_APPLE: return ".const";
+-    default:             return ".section .rodata";
++    case PLATFORM_WINDOWS: return ".section .rodata";
++    default: return get_asm_wine_section();
+     }
+ }
+ 
+@@ -1281,9 +1291,8 @@ const char *get_asm_rsrc_section(void)
+ {
+     switch (target_platform)
+     {
+-    case PLATFORM_APPLE:   return ".data";
+     case PLATFORM_WINDOWS: return ".section .rsrc";
+-    default:               return ".section .data";
++    default: return get_asm_wine_section();
+     }
+ }
+ 
+@@ -1291,7 +1300,7 @@ const char *get_asm_string_section(void)
+ {
+     switch (target_platform)
+     {
+-    case PLATFORM_APPLE: return ".cstring";
+-    default:             return ".section .rodata";
++    case PLATFORM_WINDOWS: return ".section .rodata";
++    default: return get_asm_wine_section();
+     }
+ }
+
+From f1b4f2ce34f52ec144aaab0e7800f288926a2344 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 18 Jun 2020 01:33:07 +0200
+Subject: [PATCH 20/32] winebuild: Output .text section size.
+
+---
+ dlls/ntdll/unix/loader.c | 12 ------------
+ tools/winebuild/spec32.c | 11 +++++++----
+ 2 files changed, 7 insertions(+), 16 deletions(-)
+
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 7c7589a6bfa..3a1f3b45133 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -635,7 +635,6 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     IMAGE_NT_HEADERS *nt;
+     IMAGE_SECTION_HEADER *sec;
+     BYTE *addr = (BYTE *)module, *tmp;
+-    DWORD code_end;
+     int delta;
+     unsigned int i;
+     DWORD size = nt_descr->OptionalHeader.SizeOfHeaders;
+@@ -663,16 +662,12 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     /* fixup the sections */
+ 
+     fixup_rva_dwords( &nt->OptionalHeader.SizeOfImage, delta, 1 );
+-    code_end = nt->OptionalHeader.SizeOfImage;
+ 
+     for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+     {
+         fixup_rva_dwords( &sec[i].VirtualAddress, delta, 1 );
+         fixup_rva_dwords( &sec[i].PointerToRawData, delta, 1 );
+ 
+-        if (!memcmp( sec[i].Name, ".data", sizeof(".data" )))
+-            code_end = sec[i].VirtualAddress;
+-
+         if ((sec[i].Characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA) &&
+             remap_writable( addr + sec[i].VirtualAddress, sec[i].Misc.VirtualSize ))
+             return STATUS_NO_MEMORY;
+@@ -687,13 +682,6 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ #ifndef _WIN64
+     fixup_rva_dwords( &nt->OptionalHeader.BaseOfData, delta, 1 );
+ #endif
+-    nt->OptionalHeader.SizeOfCode = code_end - nt->OptionalHeader.BaseOfCode;
+-
+-    for (i = 0; i < nt->FileHeader.NumberOfSections; ++i)
+-    {
+-        if (memcmp( sec[i].Name, ".text", sizeof(".text" ))) continue;
+-        sec[i].Misc.VirtualSize = sec[i].SizeOfRawData = nt->OptionalHeader.SizeOfCode;
+-    }
+ 
+     for (i = 0; i < nt->OptionalHeader.NumberOfRvaAndSizes; i++)
+         fixup_rva_dwords( &nt->OptionalHeader.DataDirectory[i].VirtualAddress, delta, 1 );
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 9c536bfe912..d3b6062175e 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -143,7 +143,10 @@ static void get_arg_string( ORDDEF *odp, char str[MAX_ARGUMENTS + 1] )
+ 
+ static void output_size( const char *name )
+ {
+-    output( "\t.long %s_end - %s\n", name, name );
++    if (!strcmp(name, ".L__wine_spec_text"))
++        output( "\t.long %s - %s\n", asm_name("etext"), name );
++    else
++        output( "\t.long %s_end - %s\n", name, name );
+ }
+ 
+ static void output_data_directories( const char *names[16] )
+@@ -738,7 +741,7 @@ void output_module( DLLSPEC *spec )
+              get_ptr_size() == 8 ? IMAGE_NT_OPTIONAL_HDR64_MAGIC : IMAGE_NT_OPTIONAL_HDR32_MAGIC );
+     output( "\t.byte 7\n" );              /* MajorLinkerVersion */
+     output( "\t.byte 10\n" );             /* MinorLinkerVersion */
+-    output( "\t.long 0\n" );              /* SizeOfCode */
++    output_size( ".L__wine_spec_text" );  /* SizeOfCode */
+     output_size( ".L__wine_spec_data" );  /* SizeOfInitializedData */
+     output( "\t.long 0\n" );              /* SizeOfUninitializedData */
+     output_rva( spec->init_func ?         /* AddressOfEntryPoint */
+@@ -781,9 +784,9 @@ void output_module( DLLSPEC *spec )
+     /* .text section */
+     output( "\t.ascii \".text\"\n" );                  /* Name */
+     output( "\t.align 8, 0\n" );
+-    output( "\t.long 0\n" );                           /* VirtualSize */
++    output_size( ".L__wine_spec_text" );               /* VirtualSize */
+     output_rva( "%s", ".L__wine_spec_text" );          /* VirtualAddress */
+-    output( "\t.long 0\n" );                           /* SizeOfRawData */
++    output_size( ".L__wine_spec_text" );               /* SizeOfRawData */
+     output_rva( "%s", ".L__wine_spec_text" );          /* PointerToRawData */
+     output( "\t.long 0\n" );                           /* PointerToRelocations */
+     output( "\t.long 0\n" );                           /* PointerToLinenumbers */
+
+From 303cf14524d3b6acfbaf3d3623094a3af520df62 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 14:11:17 +0200
+Subject: [PATCH 21/32] ntdll: Adjust image base to align module.
+
+---
+ dlls/ntdll/Makefile.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/ntdll/Makefile.in b/dlls/ntdll/Makefile.in
+index 6b174029056..ceec8af38e6 100644
+--- a/dlls/ntdll/Makefile.in
++++ b/dlls/ntdll/Makefile.in
+@@ -4,7 +4,7 @@ IMPORTLIB = ntdll
+ IMPORTS   = winecrt0
+ EXTRAINCL = $(UNWIND_CFLAGS)
+ EXTRALIBS = -lwine $(IOKIT_LIBS) $(COREFOUNDATION_LIBS) $(CORESERVICES_LIBS) $(RT_LIBS) $(PTHREAD_LIBS) $(UNWIND_LIBS) $(I386_LIBS)
+-EXTRADLLFLAGS = -nodefaultlibs -Wl,--image-base,0x7bc00000
++EXTRADLLFLAGS = -nodefaultlibs -Wl,--image-base,0x7bbd0000 -Wl,--section-start=.init=0x7bbfe000
+ 
+ C_SRCS = \
+ 	actctx.c \
+
+From d1cf9d65ee6cbada45de1562e77341f38b088e6e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 14:11:00 +0200
+Subject: [PATCH 22/32] kernel32: Adjust image base to align module.
+
+---
+ dlls/kernel32/Makefile.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dlls/kernel32/Makefile.in b/dlls/kernel32/Makefile.in
+index 7822309de54..ca5a2383d26 100644
+--- a/dlls/kernel32/Makefile.in
++++ b/dlls/kernel32/Makefile.in
+@@ -3,7 +3,7 @@ MODULE    = kernel32.dll
+ IMPORTLIB = kernel32
+ IMPORTS   = winecrt0 kernelbase ntdll
+ EXTRALIBS = $(COREFOUNDATION_LIBS) $(POLL_LIBS) $(RT_LIBS)
+-EXTRADLLFLAGS = -nodefaultlibs -Wb,-F,KERNEL32.dll -Wl,--image-base,0x7b600000
++EXTRADLLFLAGS = -nodefaultlibs -Wb,-F,KERNEL32.dll -Wl,--image-base,0x7b5d0000 -Wl,--section-start=.init=0x7b5fe000
+ 
+ C_SRCS = \
+ 	atom.c \
+
+From 867e8b3bef113622a4604347e6aad3d9ddf6fec4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Wed, 17 Jun 2020 12:50:30 +0200
+Subject: [PATCH 23/32] gdi32: Add image base for pre-aligned module.
+
+---
+ dlls/gdi32/Makefile.in | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/dlls/gdi32/Makefile.in b/dlls/gdi32/Makefile.in
+index 32b2e6959c1..1293b9f2568 100644
+--- a/dlls/gdi32/Makefile.in
++++ b/dlls/gdi32/Makefile.in
+@@ -5,6 +5,7 @@ IMPORTS   = advapi32
+ EXTRAINCL = $(FREETYPE_CFLAGS) $(FONTCONFIG_CFLAGS)
+ EXTRALIBS = $(CARBON_LIBS) $(APPKIT_LIBS)
+ DELAYIMPORTS = usp10 setupapi
++EXTRADLLFLAGS = -Wl,--image-base,0x7e7d0000 -Wl,--section-start=.init=0x7e7fe000
+ 
+ C_SRCS = \
+ 	bidi.c \
+
+From 0f3267855cc64604f1c88b00d0a9694b12d4e3f5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 14:05:02 +0200
+Subject: [PATCH 24/32] winegcc: Extract fake modules from the so files.
+
+---
+ tools/makedep.c         |  1 +
+ tools/winegcc/winegcc.c | 52 +++++++++++++++++++++++++++++++----------
+ 2 files changed, 41 insertions(+), 12 deletions(-)
+
+diff --git a/tools/makedep.c b/tools/makedep.c
+index 743eaf6e353..b664f9b610a 100644
+--- a/tools/makedep.c
++++ b/tools/makedep.c
+@@ -3292,6 +3292,7 @@ static void output_module( struct makefile *make )
+                           strmake( "p$(dlldir)/%s%s", make->module, dll_ext ));
+         add_install_rule( make, make->module, strmake( "%s.fake", make->module ),
+                           strmake( "d$(dlldir)/fakedlls/%s", make->module ));
++        output( "%s.fake: %s%s\n", module_path, module_path, dll_ext );
+         output( "%s%s %s.fake:", module_path, dll_ext, module_path );
+     }
+     else
+diff --git a/tools/winegcc/winegcc.c b/tools/winegcc/winegcc.c
+index 776d2b6473b..2b89e28671f 100644
+--- a/tools/winegcc/winegcc.c
++++ b/tools/winegcc/winegcc.c
+@@ -1078,7 +1078,6 @@ static void build(struct options* opts)
+     const char *output_name, *spec_file, *lang;
+     int generate_app_loader = 1;
+     const char *crt_lib = NULL, *entry_point = NULL;
+-    int fake_module = 0;
+     int is_pe = (opts->target_platform == PLATFORM_WINDOWS || opts->target_platform == PLATFORM_CYGWIN || opts->target_platform == PLATFORM_MINGW);
+     unsigned int j;
+ 
+@@ -1101,11 +1100,13 @@ static void build(struct options* opts)
+ 	return;
+     }
+ 
++    /* generate the fake module directly from the so file */
++    if (strendswith(output_file, ".fake"))
++        strcpy(output_file + strlen(output_file) - 5, ".so");
++
+     /* generate app loader only for .exe */
+     if (opts->shared || is_pe || strendswith(output_file, ".so"))
+-	generate_app_loader = 0;
+-
+-    if (strendswith(output_file, ".fake")) fake_module = 1;
++	   generate_app_loader = 0;
+ 
+     /* normalize the filename a bit: strip .so, ensure it has proper ext */
+     if ((output_name = strrchr(output_file, '/'))) output_name++;
+@@ -1242,13 +1243,6 @@ static void build(struct options* opts)
+     strarray_add(spec_args, "-D_REENTRANT");
+     if (opts->pic && !is_pe) strarray_add(spec_args, "-fPIC");
+     strarray_add(spec_args, opts->shared ? "--dll" : "--exe");
+-    if (fake_module)
+-    {
+-        strarray_add(spec_args, "--fake-module");
+-        strarray_add(spec_args, "-o");
+-        strarray_add(spec_args, output_file);
+-    }
+-    else
+     {
+         strarray_add(spec_args, "-o");
+         strarray_add(spec_args, spec_o_name);
+@@ -1315,7 +1309,6 @@ static void build(struct options* opts)
+ 
+     spawn(opts->prefix, spec_args, 0);
+     strarray_free (spec_args);
+-    if (fake_module) return;  /* nothing else to do */
+ 
+     /* link everything together now */
+     link_args = get_link_args( opts, output_name );
+@@ -1416,6 +1409,41 @@ static void build(struct options* opts)
+     spawn(opts->prefix, link_args, 0);
+     strarray_free (link_args);
+ 
++    /* extract the fake module */
++
++    if (!is_pe)
++    {
++        strarray *tool, *objcopy = build_tool_name(opts, TOOL_OBJCOPY);
++        char *tmp = get_temp_file( output_name, ".tmp" );
++        char *output_fake = strmake( "%s.fake", get_basename( output_path ) );
++        char buffer[4096];
++        FILE *in, *out;
++        size_t n;
++        int skip = 1;
++
++        tool = strarray_dup(objcopy);
++        strarray_add(tool, "-Obinary");
++        strarray_add(tool, "-j.init");
++        strarray_add(tool, "-j.text");
++        strarray_add(tool, "-j.fini");
++        strarray_add(tool, "-j.data");
++        strarray_add(tool, output_path);
++        strarray_add(tool, tmp );
++        spawn(opts->prefix, tool, 1);
++        strarray_free(tool);
++
++        in = fopen(tmp, "rb");
++        out = fopen(output_fake, "wb");
++        while ((n = fread(buffer, 1, sizeof(buffer), in)) > 0)
++        {
++            if (!memcmp(buffer, "\x4d\x5a\x90\x00", 4)) skip = 0;
++            if (skip) continue;
++            fwrite(buffer, 1, n, out);
++        }
++        fclose(out);
++        fclose(in);
++    }
++
+     if (opts->debug_file && !strendswith(opts->debug_file, ".pdb"))
+     {
+         strarray *tool, *objcopy = build_tool_name(opts, TOOL_OBJCOPY);
+
+From 98815ef181d21b409d242dfbcd2eaf0c4f602e32 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Fri, 12 Jun 2020 16:12:22 +0200
+Subject: [PATCH 25/32] winegcc: Reduce fake module size after extraction.
+
+---
+ dlls/kernel32/tests/loader.c |  1 +
+ tools/winegcc/winegcc.c      | 29 ++++++++++++++++++++++++-----
+ 2 files changed, 25 insertions(+), 5 deletions(-)
+
+diff --git a/dlls/kernel32/tests/loader.c b/dlls/kernel32/tests/loader.c
+index 984246681cb..00df10b514a 100644
+--- a/dlls/kernel32/tests/loader.c
++++ b/dlls/kernel32/tests/loader.c
+@@ -1631,6 +1631,7 @@ todo_wine
+         /* check position in file */
+         map_offset = (DWORD_PTR)RtlImageRvaToVa(RtlImageNtHeader(ptr),    ptr,    map_rva, NULL) - (DWORD_PTR)ptr;
+         dll_offset = (DWORD_PTR)RtlImageRvaToVa(RtlImageNtHeader(module), module, dll_rva, NULL) - (DWORD_PTR)module;
++        todo_wine
+         ok(map_offset == dll_offset, "%s: File offset of mapped function (0x%x) does not match dll (0x%x)\n",
+            func_name, map_offset, dll_offset);
+ 
+diff --git a/tools/winegcc/winegcc.c b/tools/winegcc/winegcc.c
+index 2b89e28671f..bcdee85a1ad 100644
+--- a/tools/winegcc/winegcc.c
++++ b/tools/winegcc/winegcc.c
+@@ -1078,6 +1078,7 @@ static void build(struct options* opts)
+     const char *output_name, *spec_file, *lang;
+     int generate_app_loader = 1;
+     const char *crt_lib = NULL, *entry_point = NULL;
++    int fake_module = 0;
+     int is_pe = (opts->target_platform == PLATFORM_WINDOWS || opts->target_platform == PLATFORM_CYGWIN || opts->target_platform == PLATFORM_MINGW);
+     unsigned int j;
+ 
+@@ -1093,6 +1094,10 @@ static void build(struct options* opts)
+ 
+     output_file = strdup( opts->output_name ? opts->output_name : "a.out" );
+ 
++    /* generate the fake module directly from the so file */
++    if (!is_pe && strendswith(output_file, ".fake"))
++        strcpy(output_file + strlen(output_file) - 5, ".so");
++
+     /* 'winegcc -o app xxx.exe.so' only creates the load script */
+     if (opts->files->size == 1 && strendswith(opts->files->base[0], ".exe.so"))
+     {
+@@ -1100,13 +1105,11 @@ static void build(struct options* opts)
+ 	return;
+     }
+ 
+-    /* generate the fake module directly from the so file */
+-    if (strendswith(output_file, ".fake"))
+-        strcpy(output_file + strlen(output_file) - 5, ".so");
+-
+     /* generate app loader only for .exe */
+     if (opts->shared || is_pe || strendswith(output_file, ".so"))
+-	   generate_app_loader = 0;
++	generate_app_loader = 0;
++
++    if (is_pe && strendswith(output_file, ".fake")) fake_module = 1;
+ 
+     /* normalize the filename a bit: strip .so, ensure it has proper ext */
+     if ((output_name = strrchr(output_file, '/'))) output_name++;
+@@ -1243,6 +1246,13 @@ static void build(struct options* opts)
+     strarray_add(spec_args, "-D_REENTRANT");
+     if (opts->pic && !is_pe) strarray_add(spec_args, "-fPIC");
+     strarray_add(spec_args, opts->shared ? "--dll" : "--exe");
++    if (fake_module)
++    {
++        strarray_add(spec_args, "--fake-module");
++        strarray_add(spec_args, "-o");
++        strarray_add(spec_args, output_file);
++    }
++    else
+     {
+         strarray_add(spec_args, "-o");
+         strarray_add(spec_args, spec_o_name);
+@@ -1310,6 +1320,8 @@ static void build(struct options* opts)
+     spawn(opts->prefix, spec_args, 0);
+     strarray_free (spec_args);
+ 
++    if (fake_module) return;  /* nothing else to do */
++
+     /* link everything together now */
+     link_args = get_link_args( opts, output_name );
+ 
+@@ -1442,6 +1454,13 @@ static void build(struct options* opts)
+         }
+         fclose(out);
+         fclose(in);
++
++        tool = strarray_dup(objcopy);
++        strarray_add(tool, "--strip-all");
++        strarray_add(tool, "--file-alignment=512");
++        strarray_add(tool, output_fake );
++        spawn(opts->prefix, tool, 1);
++        strarray_free(tool);
+     }
+ 
+     if (opts->debug_file && !strendswith(opts->debug_file, ".pdb"))
+
+From 21708f3b37c064c119baf23daba7ed5e89834951 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Mon, 15 Jun 2020 19:20:08 +0200
+Subject: [PATCH 26/32] winebuild: Introduce wrap file to wrap exported
+ symbols.
+
+---
+ tools/winebuild/build.h  |  1 +
+ tools/winebuild/main.c   | 18 ++++++++++++++++--
+ tools/winebuild/spec32.c | 34 ++++++++++++++++++++++++++++++++++
+ tools/winegcc/winegcc.c  | 28 ++++++++++++++++++++++++++--
+ 4 files changed, 77 insertions(+), 4 deletions(-)
+
+diff --git a/tools/winebuild/build.h b/tools/winebuild/build.h
+index a3ed4588f30..64a0f0cc770 100644
+--- a/tools/winebuild/build.h
++++ b/tools/winebuild/build.h
+@@ -317,6 +317,7 @@ extern void output_bin_resources( DLLSPEC *spec, unsigned int start_rva );
+ extern void output_spec32_file( DLLSPEC *spec );
+ extern void output_fake_module( DLLSPEC *spec );
+ extern void output_def_file( DLLSPEC *spec, int import_only );
++extern void output_wrap_file( DLLSPEC *spec );
+ extern void load_res16_file( const char *name, DLLSPEC *spec );
+ extern void output_res16_data( DLLSPEC *spec );
+ extern void output_bin_res16_data( DLLSPEC *spec );
+diff --git a/tools/winebuild/main.c b/tools/winebuild/main.c
+index efb86b705e1..3bbce8757e6 100644
+--- a/tools/winebuild/main.c
++++ b/tools/winebuild/main.c
+@@ -117,7 +117,8 @@ enum exec_mode_values
+     MODE_STATICLIB,
+     MODE_BUILTIN,
+     MODE_FIXUP_CTORS,
+-    MODE_RESOURCES
++    MODE_RESOURCES,
++    MODE_WRAP
+ };
+ 
+ static enum exec_mode_values exec_mode = MODE_NONE;
+@@ -330,7 +331,8 @@ enum long_options_values
+     LONG_OPT_SAVE_TEMPS,
+     LONG_OPT_STATICLIB,
+     LONG_OPT_SUBSYSTEM,
+-    LONG_OPT_VERSION
++    LONG_OPT_VERSION,
++    LONG_OPT_WRAP
+ };
+ 
+ static const char short_options[] = "B:C:D:E:F:H:I:K:L:M:N:b:d:e:f:hkl:m:o:r:u:vw";
+@@ -341,6 +343,7 @@ static const struct option long_options[] =
+     { "def",           0, 0, LONG_OPT_DEF },
+     { "exe",           0, 0, LONG_OPT_EXE },
+     { "implib",        0, 0, LONG_OPT_IMPLIB },
++    { "wrap",          0, 0, LONG_OPT_WRAP },
+     { "staticlib",     0, 0, LONG_OPT_STATICLIB },
+     { "builtin",       0, 0, LONG_OPT_BUILTIN },
+     { "as-cmd",        1, 0, LONG_OPT_ASCMD },
+@@ -513,6 +516,9 @@ static char **parse_options( int argc, char **argv, DLLSPEC *spec )
+         case LONG_OPT_IMPLIB:
+             set_exec_mode( MODE_IMPLIB );
+             break;
++        case LONG_OPT_WRAP:
++            set_exec_mode( MODE_WRAP );
++            break;
+         case LONG_OPT_STATICLIB:
+             set_exec_mode( MODE_STATICLIB );
+             break;
+@@ -703,6 +709,14 @@ int main(int argc, char **argv)
+         output_def_file( spec, 0 );
+         close_output_file();
+         break;
++    case MODE_WRAP:
++        if (argv[0]) fatal_error( "file argument '%s' not allowed in this mode\n", argv[0] );
++        if (!spec_file_name) fatal_error( "missing .spec file\n" );
++        if (!parse_input_file( spec )) break;
++        open_output_file();
++        output_wrap_file( spec );
++        close_output_file();
++        break;
+     case MODE_IMPLIB:
+         if (!spec_file_name) fatal_error( "missing .spec file\n" );
+         if (!parse_input_file( spec )) break;
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index d3b6062175e..1a4b33a5d12 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -1214,6 +1214,40 @@ void output_def_file( DLLSPEC *spec, int import_only )
+ }
+ 
+ 
++/*******************************************************************
++ *         output_wrap_file
++ */
++void output_wrap_file( DLLSPEC *spec )
++{
++    DLLSPEC *spec32 = NULL;
++    const char *name;
++    int i;
++
++    if (target_cpu != CPU_x86 && target_cpu != CPU_x86_64) return;
++
++    if (spec->type == SPEC_WIN16)
++    {
++        spec32 = alloc_dll_spec();
++        add_16bit_exports( spec32, spec );
++        spec = spec32;
++    }
++
++    for (i = 0; i < spec->nb_entry_points; i++)
++    {
++        const ORDDEF *odp = &spec->entry_points[i];
++        if (odp->type != TYPE_STDCALL && odp->type != TYPE_VARARGS && odp->type != TYPE_CDECL)
++            continue;
++        if (odp->flags & (FLAG_FORWARD|FLAG_IMPORT|FLAG_EXT_LINK))
++            continue;
++
++        name = asm_name( get_link_name( odp ) );
++        output( "-Wl,--wrap=%s\n", name );
++        output( "-Wl,--defsym=__wrap_%s=__real_%s\n", name, name );
++    }
++    if (spec32) free_dll_spec( spec32 );
++}
++
++
+ /*******************************************************************
+  *         make_builtin_files
+  */
+diff --git a/tools/winegcc/winegcc.c b/tools/winegcc/winegcc.c
+index bcdee85a1ad..2a295afbfd5 100644
+--- a/tools/winegcc/winegcc.c
++++ b/tools/winegcc/winegcc.c
+@@ -1072,9 +1072,9 @@ static void add_library( struct options *opts, strarray *lib_dirs, strarray *fil
+ static void build(struct options* opts)
+ {
+     strarray *lib_dirs, *files;
+-    strarray *spec_args, *link_args, *tool;
++    strarray *spec_args, *wrap_args, *link_args, *tool;
+     char *output_file, *output_path;
+-    const char *spec_o_name, *libgcc = NULL;
++    const char *spec_o_name, *wrap_name, *libgcc = NULL;
+     const char *output_name, *spec_file, *lang;
+     int generate_app_loader = 1;
+     const char *crt_lib = NULL, *entry_point = NULL;
+@@ -1322,6 +1322,29 @@ static void build(struct options* opts)
+ 
+     if (fake_module) return;  /* nothing else to do */
+ 
++    /* run winebuild to generate the .wrap file */
++    if (!is_pe && spec_file)
++    {
++        wrap_args = get_winebuild_args( opts );
++        wrap_name = get_temp_file(output_name, ".wrap");
++        if (opts->force_pointer_size)
++            strarray_add(wrap_args, strmake("-m%u", 8 * opts->force_pointer_size ));
++        strarray_add(wrap_args, "--wrap");
++        {
++            strarray_add(wrap_args, "-o");
++            strarray_add(wrap_args, wrap_name);
++        }
++        if (spec_file)
++        {
++            strarray_add(wrap_args, "-E");
++            strarray_add(wrap_args, spec_file);
++        }
++        if (opts->win16_app) strarray_add(wrap_args, "-m16");
++
++        spawn(opts->prefix, wrap_args, 0);
++        strarray_free (wrap_args);
++    }
++
+     /* link everything together now */
+     link_args = get_link_args( opts, output_name );
+ 
+@@ -1351,6 +1374,7 @@ static void build(struct options* opts)
+     }
+ 
+     strarray_add(link_args, spec_o_name);
++    if (!is_pe && spec_file) strarray_add(link_args, strmake("@%s", wrap_name));
+ 
+     if (is_pe)
+     {
+
+From 7344f224070c0d91e37b400fdf693341aecf3f89 Mon Sep 17 00:00:00 2001
+From: Sebastian Lackner <sebastian@fds-team.de>
+Date: Tue, 16 May 2017 04:37:52 +0200
+Subject: [PATCH 27/32] krnl386.exe16: Do not abuse WOW32Reserved field for
+ 16-bit stack address.
+
+---
+ dlls/dbghelp/cpu_i386.c               |  6 ++---
+ dlls/krnl386.exe16/kernel.c           |  6 ++---
+ dlls/krnl386.exe16/kernel16_private.h | 11 ++++----
+ dlls/krnl386.exe16/ne_module.c        |  6 ++---
+ dlls/krnl386.exe16/ne_segment.c       | 20 +++++++--------
+ dlls/krnl386.exe16/task.c             | 14 +++++------
+ dlls/krnl386.exe16/thunk.c            | 36 +++++++++++++--------------
+ dlls/krnl386.exe16/wowthunk.c         | 20 +++++++--------
+ dlls/ntdll/unix/signal_i386.c         |  2 +-
+ dlls/system.drv16/system.c            |  2 +-
+ dlls/toolhelp.dll16/toolhelp.c        |  6 ++---
+ dlls/user.exe16/message.c             | 16 ++++++------
+ dlls/user.exe16/user.c                |  4 +--
+ dlls/user.exe16/window.c              |  2 +-
+ include/winternl.h                    |  2 +-
+ tools/winebuild/relay.c               |  2 +-
+ 16 files changed, 78 insertions(+), 77 deletions(-)
+
+diff --git a/dlls/dbghelp/cpu_i386.c b/dlls/dbghelp/cpu_i386.c
+index fd808a0d324..7d6723977a2 100644
+--- a/dlls/dbghelp/cpu_i386.c
++++ b/dlls/dbghelp/cpu_i386.c
+@@ -213,16 +213,16 @@ static BOOL i386_stack_walk(struct cpu_stack_walk *csw, STACKFRAME64 *frame,
+         /* Init done */
+         set_curr_mode((frame->AddrPC.Mode == AddrModeFlat) ? stm_32bit : stm_16bit);
+ 
+-        /* cur_switch holds address of WOW32Reserved field in TEB in debuggee
++        /* cur_switch holds address of SystemReserved1[0] field in TEB in debuggee
+          * address space
+          */
+         if (NtQueryInformationThread(csw->hThread, ThreadBasicInformation, &info,
+                                      sizeof(info), NULL) == STATUS_SUCCESS)
+         {
+-            curr_switch = (DWORD_PTR)info.TebBaseAddress + FIELD_OFFSET(TEB, WOW32Reserved);
++            curr_switch = (DWORD_PTR)info.TebBaseAddress + FIELD_OFFSET(TEB, SystemReserved1[0]);
+             if (!sw_read_mem(csw, curr_switch, &p, sizeof(p)))
+             {
+-                WARN("Can't read TEB:WOW32Reserved\n");
++                WARN("Can't read TEB:SystemReserved1[0]\n");
+                 goto done_err;
+             }
+             next_switch = p;
+diff --git a/dlls/krnl386.exe16/kernel.c b/dlls/krnl386.exe16/kernel.c
+index 07a57d0d937..89ea5c042e7 100644
+--- a/dlls/krnl386.exe16/kernel.c
++++ b/dlls/krnl386.exe16/kernel.c
+@@ -47,8 +47,8 @@ static void thread_attach(void)
+     /* allocate the 16-bit stack (FIXME: should be done lazily) */
+     HGLOBAL16 hstack = WOWGlobalAlloc16( GMEM_FIXED, 0x10000 );
+     kernel_get_thread_data()->stack_sel = GlobalHandleToSel16( hstack );
+-    NtCurrentTeb()->WOW32Reserved = (void *)MAKESEGPTR( kernel_get_thread_data()->stack_sel,
+-                                                        0x10000 - sizeof(STACK16FRAME) );
++    NtCurrentTeb()->SystemReserved1[0] = (void *)MAKESEGPTR( kernel_get_thread_data()->stack_sel,
++                                                             0x10000 - sizeof(STACK16FRAME) );
+     memset( (char *)GlobalLock16(hstack) + 0x10000 - sizeof(STACK16FRAME), 0, sizeof(STACK16FRAME) );
+ }
+ 
+@@ -60,7 +60,7 @@ static void thread_detach(void)
+ {
+     /* free the 16-bit stack */
+     WOWGlobalFree16( kernel_get_thread_data()->stack_sel );
+-    NtCurrentTeb()->WOW32Reserved = 0;
++    NtCurrentTeb()->SystemReserved1[0] = 0;
+     if (NtCurrentTeb()->Tib.SubSystemTib) TASK_ExitTask();
+ }
+ 
+diff --git a/dlls/krnl386.exe16/kernel16_private.h b/dlls/krnl386.exe16/kernel16_private.h
+index f15934daa0e..9f939a9d5ba 100644
+--- a/dlls/krnl386.exe16/kernel16_private.h
++++ b/dlls/krnl386.exe16/kernel16_private.h
+@@ -169,7 +169,7 @@ extern THHOOK *pThhook DECLSPEC_HIDDEN;
+     (((offset)+(size) <= pModule->mapping_size) ? \
+      (memcpy( buffer, (const char *)pModule->mapping + (offset), (size) ), TRUE) : FALSE)
+ 
+-#define CURRENT_STACK16 ((STACK16FRAME*)MapSL(PtrToUlong(NtCurrentTeb()->WOW32Reserved)))
++#define CURRENT_STACK16 ((STACK16FRAME*)MapSL(PtrToUlong(NtCurrentTeb()->SystemReserved1[0])))
+ #define CURRENT_DS      (CURRENT_STACK16->ds)
+ 
+ /* push bytes on the 16-bit stack of a thread; return a segptr to the first pushed byte */
+@@ -177,8 +177,8 @@ static inline SEGPTR stack16_push( int size )
+ {
+     STACK16FRAME *frame = CURRENT_STACK16;
+     memmove( (char*)frame - size, frame, sizeof(*frame) );
+-    NtCurrentTeb()->WOW32Reserved = (char *)NtCurrentTeb()->WOW32Reserved - size;
+-    return (SEGPTR)((char *)NtCurrentTeb()->WOW32Reserved + sizeof(*frame));
++    NtCurrentTeb()->SystemReserved1[0] = (char *)NtCurrentTeb()->SystemReserved1[0] - size;
++    return (SEGPTR)((char *)NtCurrentTeb()->SystemReserved1[0] + sizeof(*frame));
+ }
+ 
+ /* pop bytes from the 16-bit stack of a thread */
+@@ -186,7 +186,7 @@ static inline void stack16_pop( int size )
+ {
+     STACK16FRAME *frame = CURRENT_STACK16;
+     memmove( (char*)frame + size, frame, sizeof(*frame) );
+-    NtCurrentTeb()->WOW32Reserved = (char *)NtCurrentTeb()->WOW32Reserved + size;
++    NtCurrentTeb()->SystemReserved1[0] = (char *)NtCurrentTeb()->SystemReserved1[0] + size;
+ }
+ 
+ /* dosmem.c */
+@@ -300,11 +300,12 @@ struct tagSYSLEVEL;
+ 
+ struct kernel_thread_data
+ {
++    void               *reserved;       /* stack segment pointer */
+     WORD                stack_sel;      /* 16-bit stack selector */
+     WORD                htask16;        /* Win16 task handle */
+     DWORD               sys_count[4];   /* syslevel mutex entry counters */
+     struct tagSYSLEVEL *sys_mutex[4];   /* syslevel mutex pointers */
+-    void               *pad[45];        /* change this if you add fields! */
++    void               *pad[44];        /* change this if you add fields! */
+ };
+ 
+ static inline struct kernel_thread_data *kernel_get_thread_data(void)
+diff --git a/dlls/krnl386.exe16/ne_module.c b/dlls/krnl386.exe16/ne_module.c
+index f1e1a14dd67..c951a18f869 100644
+--- a/dlls/krnl386.exe16/ne_module.c
++++ b/dlls/krnl386.exe16/ne_module.c
+@@ -1208,7 +1208,7 @@ DWORD NE_StartTask(void)
+             sp = pSegTable[SELECTOROF(pModule->ne_sssp)-1].minsize + pModule->ne_stack;
+         sp &= ~1;
+         sp -= sizeof(STACK16FRAME);
+-        NtCurrentTeb()->WOW32Reserved = (void *)MAKESEGPTR( GlobalHandleToSel16(hInstance), sp );
++        NtCurrentTeb()->SystemReserved1[0] = (void *)MAKESEGPTR( GlobalHandleToSel16(hInstance), sp );
+ 
+         /* Registers at initialization must be:
+          * ax   zero
+@@ -1236,8 +1236,8 @@ DWORD NE_StartTask(void)
+ 
+         TRACE("Starting main program: cs:ip=%04x:%04x ds=%04x ss:sp=%04x:%04x\n",
+               context.SegCs, context.Eip, context.SegDs,
+-              SELECTOROF(NtCurrentTeb()->WOW32Reserved),
+-              OFFSETOF(NtCurrentTeb()->WOW32Reserved) );
++              SELECTOROF(NtCurrentTeb()->SystemReserved1[0]),
++              OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) );
+ 
+         WOWCallback16Ex( 0, WCB16_REGS, 0, NULL, (DWORD *)&context );
+         ExitThread( LOWORD(context.Eax) );
+diff --git a/dlls/krnl386.exe16/ne_segment.c b/dlls/krnl386.exe16/ne_segment.c
+index aa886148029..70eb3360914 100644
+--- a/dlls/krnl386.exe16/ne_segment.c
++++ b/dlls/krnl386.exe16/ne_segment.c
+@@ -370,9 +370,9 @@ BOOL NE_LoadSegment( NE_MODULE *pModule, WORD segnum )
+         DWORD ret;
+ 
+  	selfloadheader = MapSL( MAKESEGPTR(SEL(pSegTable->hSeg),0) );
+-        oldstack = NtCurrentTeb()->WOW32Reserved;
+-        NtCurrentTeb()->WOW32Reserved = (void *)MAKESEGPTR(pModule->self_loading_sel,
+-                                                           0xff00 - sizeof(STACK16FRAME));
++        oldstack = NtCurrentTeb()->SystemReserved1[0];
++        NtCurrentTeb()->SystemReserved1[0] = (void *)MAKESEGPTR(pModule->self_loading_sel,
++                                                                0xff00 - sizeof(STACK16FRAME));
+ 
+         hFile16 = NE_OpenFile( pModule );
+         TRACE_(dll)("Call LoadAppSegProc(hmodule=0x%04x,hf=%x,segnum=%d)\n",
+@@ -384,7 +384,7 @@ BOOL NE_LoadSegment( NE_MODULE *pModule, WORD segnum )
+         pSeg->hSeg = LOWORD(ret);
+         TRACE_(dll)("Ret LoadAppSegProc: hSeg=0x%04x\n", pSeg->hSeg);
+         _lclose16( hFile16 );
+-        NtCurrentTeb()->WOW32Reserved = oldstack;
++        NtCurrentTeb()->SystemReserved1[0] = oldstack;
+ 
+         pSeg->flags |= NE_SEGFLAGS_LOADED;
+         return TRUE;
+@@ -476,9 +476,9 @@ BOOL NE_LoadAllSegments( NE_MODULE *pModule )
+         sel = GlobalAlloc16( GMEM_ZEROINIT, 0xFF00 );
+         pModule->self_loading_sel = SEL(sel);
+         FarSetOwner16( sel, pModule->self );
+-        oldstack = NtCurrentTeb()->WOW32Reserved;
+-        NtCurrentTeb()->WOW32Reserved = (void *)MAKESEGPTR(pModule->self_loading_sel,
+-                                                           0xff00 - sizeof(STACK16FRAME) );
++        oldstack = NtCurrentTeb()->SystemReserved1[0];
++        NtCurrentTeb()->SystemReserved1[0] = (void *)MAKESEGPTR(pModule->self_loading_sel,
++                                                                0xff00 - sizeof(STACK16FRAME) );
+ 
+         hFile16 = NE_OpenFile(pModule);
+         TRACE_(dll)("CallBootAppProc(hModule=0x%04x,hf=0x%04x)\n",
+@@ -488,7 +488,7 @@ BOOL NE_LoadAllSegments( NE_MODULE *pModule )
+         WOWCallback16Ex( (DWORD)selfloadheader->BootApp, WCB16_PASCAL, sizeof(args), args, NULL );
+ 	TRACE_(dll)("Return from CallBootAppProc\n");
+         _lclose16(hFile16);
+-        NtCurrentTeb()->WOW32Reserved = oldstack;
++        NtCurrentTeb()->SystemReserved1[0] = oldstack;
+ 
+         for (i = 2; i <= pModule->ne_cseg; i++)
+             if (!NE_LoadSegment( pModule, i )) return FALSE;
+@@ -680,7 +680,7 @@ static BOOL NE_InitDLL( NE_MODULE *pModule )
+     context.SegEs = ds;   /* who knows ... */
+     context.SegCs = SEL(pSegTable[SELECTOROF(pModule->ne_csip)-1].hSeg);
+     context.Eip   = OFFSETOF(pModule->ne_csip);
+-    context.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME,bp);
++    context.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME,bp);
+ 
+     pModule->ne_csip = 0;  /* Don't initialize it twice */
+     TRACE_(dll)("Calling LibMain for %.*s, cs:ip=%04x:%04x ds=%04x di=%04x cx=%04x\n",
+@@ -782,7 +782,7 @@ static void NE_CallDllEntryPoint( NE_MODULE *pModule, DWORD dwReason )
+         context.SegEs = ds;   /* who knows ... */
+         context.SegCs = HIWORD(entryPoint);
+         context.Eip   = LOWORD(entryPoint);
+-        context.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME,bp);
++        context.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME,bp);
+ 
+         args[7] = HIWORD(dwReason);
+         args[6] = LOWORD(dwReason);
+diff --git a/dlls/krnl386.exe16/task.c b/dlls/krnl386.exe16/task.c
+index 39a60cb97a9..21de62c5a01 100644
+--- a/dlls/krnl386.exe16/task.c
++++ b/dlls/krnl386.exe16/task.c
+@@ -624,7 +624,7 @@ void WINAPI InitTask16( CONTEXT *context )
+ 
+     /* Initialize the INSTANCEDATA structure */
+     pinstance = MapSL( MAKESEGPTR(CURRENT_DS, 0) );
+-    pinstance->stackmin    = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + sizeof( STACK16FRAME );
++    pinstance->stackmin    = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + sizeof( STACK16FRAME );
+     pinstance->stackbottom = pinstance->stackmin; /* yup, that's right. Confused me too. */
+     pinstance->stacktop    = ( pinstance->stackmin > LOWORD(context->Ebx) ?
+                                pinstance->stackmin - LOWORD(context->Ebx) : 0 ) + 150;
+@@ -1095,14 +1095,14 @@ void WINAPI SwitchStackTo16( WORD seg, WORD ptr, WORD top )
+ 
+     if (!(pData = GlobalLock16( seg ))) return;
+     TRACE("old=%04x:%04x new=%04x:%04x\n",
+-          SELECTOROF( NtCurrentTeb()->WOW32Reserved ),
+-          OFFSETOF( NtCurrentTeb()->WOW32Reserved ), seg, ptr );
++          SELECTOROF( NtCurrentTeb()->SystemReserved1[0] ),
++          OFFSETOF( NtCurrentTeb()->SystemReserved1[0] ), seg, ptr );
+ 
+     /* Save the old stack */
+ 
+     oldFrame = CURRENT_STACK16;
+     /* pop frame + args and push bp */
+-    pData->old_ss_sp   = (SEGPTR)NtCurrentTeb()->WOW32Reserved + sizeof(STACK16FRAME)
++    pData->old_ss_sp   = (SEGPTR)NtCurrentTeb()->SystemReserved1[0] + sizeof(STACK16FRAME)
+                            + 2 * sizeof(WORD);
+     *(WORD *)MapSL(pData->old_ss_sp) = oldFrame->bp;
+     pData->stacktop    = top;
+@@ -1116,7 +1116,7 @@ void WINAPI SwitchStackTo16( WORD seg, WORD ptr, WORD top )
+      */
+     copySize = oldFrame->bp - OFFSETOF(pData->old_ss_sp);
+     copySize += 3 * sizeof(WORD) + sizeof(STACK16FRAME);
+-    NtCurrentTeb()->WOW32Reserved = (void *)MAKESEGPTR( seg, ptr - copySize );
++    NtCurrentTeb()->SystemReserved1[0] = (void *)MAKESEGPTR( seg, ptr - copySize );
+     newFrame = CURRENT_STACK16;
+ 
+     /* Copy the stack frame and the local variables to the new stack */
+@@ -1135,7 +1135,7 @@ void WINAPI SwitchStackBack16( CONTEXT *context )
+     STACK16FRAME *oldFrame, *newFrame;
+     INSTANCEDATA *pData;
+ 
+-    if (!(pData = GlobalLock16(SELECTOROF(NtCurrentTeb()->WOW32Reserved))))
++    if (!(pData = GlobalLock16(SELECTOROF(NtCurrentTeb()->SystemReserved1[0]))))
+         return;
+     if (!pData->old_ss_sp)
+     {
+@@ -1154,7 +1154,7 @@ void WINAPI SwitchStackBack16( CONTEXT *context )
+ 
+     /* Switch back to the old stack */
+ 
+-    NtCurrentTeb()->WOW32Reserved = (void *)(pData->old_ss_sp - sizeof(STACK16FRAME));
++    NtCurrentTeb()->SystemReserved1[0] = (void *)(pData->old_ss_sp - sizeof(STACK16FRAME));
+     context->SegSs = SELECTOROF(pData->old_ss_sp);
+     context->Esp   = OFFSETOF(pData->old_ss_sp) - sizeof(DWORD); /*ret addr*/
+     pData->old_ss_sp = 0;
+diff --git a/dlls/krnl386.exe16/thunk.c b/dlls/krnl386.exe16/thunk.c
+index e913a08f88c..ecc94371488 100644
+--- a/dlls/krnl386.exe16/thunk.c
++++ b/dlls/krnl386.exe16/thunk.c
+@@ -429,7 +429,7 @@ void WINAPI __regs_QT_Thunk( CONTEXT *context )
+     context16.Eip   = LOWORD(context->Edx);
+     /* point EBP to the STACK16FRAME on the stack
+      * for the call_to_16 to set up the register content on calling */
+-    context16.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME,bp);
++    context16.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME,bp);
+ 
+     /*
+      * used to be (problematic):
+@@ -451,7 +451,7 @@ void WINAPI __regs_QT_Thunk( CONTEXT *context )
+      * the number of parameters that the Win16 function
+      * accepted (that it popped from the corresponding Win16 stack) */
+     context->Esp +=   LOWORD(context16.Esp) -
+-                        ( OFFSETOF(NtCurrentTeb()->WOW32Reserved) - argsize );
++                        ( OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) - argsize );
+ }
+ DEFINE_REGS_ENTRYPOINT( QT_Thunk )
+ 
+@@ -555,7 +555,7 @@ void WINAPI __regs_FT_Thunk( CONTEXT *context )
+ 
+     context16.SegCs = HIWORD(callTarget);
+     context16.Eip   = LOWORD(callTarget);
+-    context16.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME,bp);
++    context16.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME,bp);
+ 
+     argsize  = context->Ebp-context->Esp-0x40;
+     if (argsize > sizeof(newstack)) argsize = sizeof(newstack);
+@@ -567,8 +567,8 @@ void WINAPI __regs_FT_Thunk( CONTEXT *context )
+ 	if (mapESPrelative & (1 << i))
+ 	{
+ 	    SEGPTR *arg = (SEGPTR *)newstack[i];
+-	    *arg = MAKESEGPTR(SELECTOROF(NtCurrentTeb()->WOW32Reserved),
+-                              OFFSETOF(NtCurrentTeb()->WOW32Reserved) - argsize
++	    *arg = MAKESEGPTR(SELECTOROF(NtCurrentTeb()->SystemReserved1[0]),
++                              OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) - argsize
+                               + (*(LPBYTE *)arg - oldstack));
+ 	}
+ 
+@@ -578,7 +578,7 @@ void WINAPI __regs_FT_Thunk( CONTEXT *context )
+     context->Ecx = context16.Ecx;
+ 
+     context->Esp +=   LOWORD(context16.Esp) -
+-                        ( OFFSETOF(NtCurrentTeb()->WOW32Reserved) - argsize );
++                        ( OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) - argsize );
+ 
+     /* Copy modified buffers back to 32-bit stack */
+     memcpy( oldstack, newstack, argsize );
+@@ -713,7 +713,7 @@ void WINAPI __regs_Common32ThkLS( CONTEXT *context )
+     context16.Edi   = LOWORD(context->Ecx);
+     context16.SegCs = HIWORD(context->Eax);
+     context16.Eip   = LOWORD(context->Eax);
+-    context16.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME,bp);
++    context16.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME,bp);
+ 
+     argsize = HIWORD(context->Edx) * 4;
+ 
+@@ -769,7 +769,7 @@ void WINAPI __regs_OT_32ThkLSF( CONTEXT *context )
+ 
+     context16.SegCs = HIWORD(context->Edx);
+     context16.Eip   = LOWORD(context->Edx);
+-    context16.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME,bp);
++    context16.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME,bp);
+ 
+     argsize = 2 * *(WORD *)context->Esp + 2;
+ 
+@@ -782,7 +782,7 @@ void WINAPI __regs_OT_32ThkLSF( CONTEXT *context )
+             (LPBYTE)CURRENT_STACK16 - argsize, argsize );
+ 
+     context->Esp +=   LOWORD(context16.Esp) -
+-                        ( OFFSETOF(NtCurrentTeb()->WOW32Reserved) - argsize );
++                        ( OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) - argsize );
+ }
+ DEFINE_REGS_ENTRYPOINT( OT_32ThkLSF )
+ 
+@@ -1234,26 +1234,26 @@ void WINAPI __regs_K32Thk1632Prolog( CONTEXT *context )
+       DWORD argSize = context->Ebp - context->Esp;
+       char *stack16 = (char *)context->Esp - 4;
+       STACK16FRAME *frame16 = (STACK16FRAME *)stack16 - 1;
+-      STACK32FRAME *frame32 = NtCurrentTeb()->WOW32Reserved;
++      STACK32FRAME *frame32 = NtCurrentTeb()->SystemReserved1[0];
+       char *stack32 = (char *)frame32 - argSize;
+       WORD  stackSel  = SELECTOROF(frame32->frame16);
+       DWORD stackBase = GetSelectorBase(stackSel);
+ 
+       TRACE("before SYSTHUNK hack: EBP: %08x ESP: %08x cur_stack: %p\n",
+-            context->Ebp, context->Esp, NtCurrentTeb()->WOW32Reserved);
++            context->Ebp, context->Esp, NtCurrentTeb()->SystemReserved1[0]);
+ 
+       memset(frame16, '\0', sizeof(STACK16FRAME));
+       frame16->frame32 = frame32;
+       frame16->ebp = context->Ebp;
+ 
+       memcpy(stack32, stack16, argSize);
+-      NtCurrentTeb()->WOW32Reserved = (void *)MAKESEGPTR(stackSel, (DWORD)frame16 - stackBase);
++      NtCurrentTeb()->SystemReserved1[0] = (void *)MAKESEGPTR(stackSel, (DWORD)frame16 - stackBase);
+ 
+       context->Esp = (DWORD)stack32 + 4;
+       context->Ebp = context->Esp + argSize;
+ 
+       TRACE("after  SYSTHUNK hack: EBP: %08x ESP: %08x cur_stack: %p\n",
+-            context->Ebp, context->Esp, NtCurrentTeb()->WOW32Reserved);
++            context->Ebp, context->Esp, NtCurrentTeb()->SystemReserved1[0]);
+    }
+ 
+     /* entry_point is never used again once the entry point has
+@@ -1276,7 +1276,7 @@ void WINAPI __regs_K32Thk1632Epilog( CONTEXT *context )
+    if (   code[5] == 0xFF && code[6] == 0x55 && code[7] == 0xFC
+        && code[13] == 0x66 && code[14] == 0xCB)
+    {
+-      STACK16FRAME *frame16 = MapSL((SEGPTR)NtCurrentTeb()->WOW32Reserved);
++      STACK16FRAME *frame16 = MapSL((SEGPTR)NtCurrentTeb()->SystemReserved1[0]);
+       char *stack16 = (char *)(frame16 + 1);
+       DWORD argSize = frame16->ebp - (DWORD)stack16;
+       char *stack32 = (char *)frame16->frame32 - argSize;
+@@ -1284,15 +1284,15 @@ void WINAPI __regs_K32Thk1632Epilog( CONTEXT *context )
+       DWORD nArgsPopped = context->Esp - (DWORD)stack32;
+ 
+       TRACE("before SYSTHUNK hack: EBP: %08x ESP: %08x cur_stack: %p\n",
+-            context->Ebp, context->Esp, NtCurrentTeb()->WOW32Reserved);
++            context->Ebp, context->Esp, NtCurrentTeb()->SystemReserved1[0]);
+ 
+-      NtCurrentTeb()->WOW32Reserved = frame16->frame32;
++      NtCurrentTeb()->SystemReserved1[0] = frame16->frame32;
+ 
+       context->Esp = (DWORD)stack16 + nArgsPopped;
+       context->Ebp = frame16->ebp;
+ 
+       TRACE("after  SYSTHUNK hack: EBP: %08x ESP: %08x cur_stack: %p\n",
+-            context->Ebp, context->Esp, NtCurrentTeb()->WOW32Reserved);
++            context->Ebp, context->Esp, NtCurrentTeb()->SystemReserved1[0]);
+    }
+ }
+ DEFINE_REGS_ENTRYPOINT( K32Thk1632Epilog )
+@@ -2303,7 +2303,7 @@ void WINAPI Throw16( LPCATCHBUF lpbuf, INT16 retval, CONTEXT *context )
+     frame32 = pFrame->frame32;
+     while (frame32 && frame32->frame16)
+     {
+-        if (OFFSETOF(frame32->frame16) < OFFSETOF(NtCurrentTeb()->WOW32Reserved))
++        if (OFFSETOF(frame32->frame16) < OFFSETOF(NtCurrentTeb()->SystemReserved1[0]))
+             break;  /* Something strange is going on */
+         if (OFFSETOF(frame32->frame16) > lpbuf[2])
+         {
+diff --git a/dlls/krnl386.exe16/wowthunk.c b/dlls/krnl386.exe16/wowthunk.c
+index 2dddbf93289..3a4b104a673 100644
+--- a/dlls/krnl386.exe16/wowthunk.c
++++ b/dlls/krnl386.exe16/wowthunk.c
+@@ -127,7 +127,7 @@ static DWORD call16_handler( EXCEPTION_RECORD *record, EXCEPTION_REGISTRATION_RE
+     {
+         /* unwinding: restore the stack pointer in the TEB, and leave the Win16 mutex */
+         STACK32FRAME *frame32 = CONTAINING_RECORD(frame, STACK32FRAME, frame);
+-        NtCurrentTeb()->WOW32Reserved = (void *)frame32->frame16;
++        NtCurrentTeb()->SystemReserved1[0] = (void *)frame32->frame16;
+         _LeaveWin16Lock();
+     }
+     else if (record->ExceptionCode == EXCEPTION_ACCESS_VIOLATION ||
+@@ -412,8 +412,8 @@ BOOL WINAPI K32WOWCallback16Ex( DWORD vpfn16, DWORD dwFlags,
+             TRACE_(relay)( "\1CallTo16(func=%04x:%04x", context->SegCs, LOWORD(context->Eip) );
+             while (count) TRACE_(relay)( ",%04x", wstack[--count] );
+             TRACE_(relay)( ") ss:sp=%04x:%04x ax=%04x bx=%04x cx=%04x dx=%04x si=%04x di=%04x bp=%04x ds=%04x es=%04x\n",
+-                           SELECTOROF(NtCurrentTeb()->WOW32Reserved),
+-                           OFFSETOF(NtCurrentTeb()->WOW32Reserved),
++                           SELECTOROF(NtCurrentTeb()->SystemReserved1[0]),
++                           OFFSETOF(NtCurrentTeb()->SystemReserved1[0]),
+                            (WORD)context->Eax, (WORD)context->Ebx, (WORD)context->Ecx,
+                            (WORD)context->Edx, (WORD)context->Esi, (WORD)context->Edi,
+                            (WORD)context->Ebp, (WORD)context->SegDs, (WORD)context->SegEs );
+@@ -443,8 +443,8 @@ BOOL WINAPI K32WOWCallback16Ex( DWORD vpfn16, DWORD dwFlags,
+         if (TRACE_ON(relay))
+         {
+             TRACE_(relay)( "\1RetFrom16() ss:sp=%04x:%04x ax=%04x bx=%04x cx=%04x dx=%04x bp=%04x sp=%04x\n",
+-                           SELECTOROF(NtCurrentTeb()->WOW32Reserved),
+-                           OFFSETOF(NtCurrentTeb()->WOW32Reserved),
++                           SELECTOROF(NtCurrentTeb()->SystemReserved1[0]),
++                           OFFSETOF(NtCurrentTeb()->SystemReserved1[0]),
+                            (WORD)context->Eax, (WORD)context->Ebx, (WORD)context->Ecx,
+                            (WORD)context->Edx, (WORD)context->Ebp, (WORD)context->Esp );
+             SYSLEVEL_CheckNotLevel( 2 );
+@@ -460,10 +460,10 @@ BOOL WINAPI K32WOWCallback16Ex( DWORD vpfn16, DWORD dwFlags,
+             WORD * wstack = (WORD *)stack;
+ 
+             TRACE_(relay)( "\1CallTo16(func=%04x:%04x,ds=%04x",
+-                           HIWORD(vpfn16), LOWORD(vpfn16), SELECTOROF(NtCurrentTeb()->WOW32Reserved) );
++                           HIWORD(vpfn16), LOWORD(vpfn16), SELECTOROF(NtCurrentTeb()->SystemReserved1[0]) );
+             while (count) TRACE_(relay)( ",%04x", wstack[--count] );
+-            TRACE_(relay)( ") ss:sp=%04x:%04x\n", SELECTOROF(NtCurrentTeb()->WOW32Reserved),
+-                           OFFSETOF(NtCurrentTeb()->WOW32Reserved) );
++            TRACE_(relay)( ") ss:sp=%04x:%04x\n", SELECTOROF(NtCurrentTeb()->SystemReserved1[0]),
++                           OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) );
+             SYSLEVEL_CheckNotLevel( 2 );
+         }
+ 
+@@ -486,8 +486,8 @@ BOOL WINAPI K32WOWCallback16Ex( DWORD vpfn16, DWORD dwFlags,
+         if (TRACE_ON(relay))
+         {
+             TRACE_(relay)( "\1RetFrom16() ss:sp=%04x:%04x retval=%08x\n",
+-                           SELECTOROF(NtCurrentTeb()->WOW32Reserved),
+-                           OFFSETOF(NtCurrentTeb()->WOW32Reserved), ret );
++                           SELECTOROF(NtCurrentTeb()->SystemReserved1[0]),
++                           OFFSETOF(NtCurrentTeb()->SystemReserved1[0]), ret );
+             SYSLEVEL_CheckNotLevel( 2 );
+         }
+     }
+diff --git a/dlls/ntdll/unix/signal_i386.c b/dlls/ntdll/unix/signal_i386.c
+index 2f5d397ed55..dbbffa2d4e3 100644
+--- a/dlls/ntdll/unix/signal_i386.c
++++ b/dlls/ntdll/unix/signal_i386.c
+@@ -645,7 +645,7 @@ static inline void *init_handler( const ucontext_t *sigcontext )
+          * SS is still non-system segment. This is why both CS and SS
+          * are checked.
+          */
+-        return teb->WOW32Reserved;
++        return teb->SystemReserved1[0];
+     }
+     return (void *)(ESP_sig(sigcontext) & ~3);
+ }
+diff --git a/dlls/system.drv16/system.c b/dlls/system.drv16/system.c
+index b6fd51c05f0..695ad7b6003 100644
+--- a/dlls/system.drv16/system.c
++++ b/dlls/system.drv16/system.c
+@@ -70,7 +70,7 @@ static void CALLBACK SYSTEM_TimerTick( LPVOID arg, DWORD low, DWORD high )
+             memset( &context, 0, sizeof(context) );
+             context.SegCs = SELECTOROF( proc );
+             context.Eip   = OFFSETOF( proc );
+-            context.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME, bp);
++            context.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME, bp);
+             context.Eax   = i + 1;
+ 
+             WOWCallback16Ex( 0, WCB16_REGS, 0, NULL, (DWORD *)&context );
+diff --git a/dlls/toolhelp.dll16/toolhelp.c b/dlls/toolhelp.dll16/toolhelp.c
+index 578d1ae7fab..1077f0b0367 100644
+--- a/dlls/toolhelp.dll16/toolhelp.c
++++ b/dlls/toolhelp.dll16/toolhelp.c
+@@ -491,8 +491,8 @@ BOOL16 WINAPI TaskNext16( TASKENTRY *lpte )
+     lpte->hTaskParent   = pTask->hParent;
+     lpte->hInst         = pTask->hInstance;
+     lpte->hModule       = pTask->hModule;
+-    lpte->wSS           = SELECTOROF( pTask->teb->WOW32Reserved );
+-    lpte->wSP           = OFFSETOF( pTask->teb->WOW32Reserved );
++    lpte->wSS           = SELECTOROF( pTask->teb->SystemReserved1[0] );
++    lpte->wSP           = OFFSETOF( pTask->teb->SystemReserved1[0] );
+     lpte->wStackTop     = pInstData->stacktop;
+     lpte->wStackMinimum = pInstData->stackmin;
+     lpte->wStackBottom  = pInstData->stackbottom;
+@@ -718,7 +718,7 @@ BOOL16 WINAPI TimerCount16( TIMERINFO *pTimerInfo )
+  */
+ BOOL16 WINAPI SystemHeapInfo16( SYSHEAPINFO *pHeapInfo )
+ {
+-    STACK16FRAME* stack16 = MapSL((SEGPTR)NtCurrentTeb()->WOW32Reserved);
++    STACK16FRAME* stack16 = MapSL((SEGPTR)NtCurrentTeb()->SystemReserved1[0]);
+     HANDLE16 oldDS = stack16->ds;
+     WORD user = LoadLibrary16( "USER.EXE" );
+     WORD gdi = LoadLibrary16( "GDI.EXE" );
+diff --git a/dlls/user.exe16/message.c b/dlls/user.exe16/message.c
+index e3ca3fd779d..fa9388ceaa1 100644
+--- a/dlls/user.exe16/message.c
++++ b/dlls/user.exe16/message.c
+@@ -240,11 +240,11 @@ static LRESULT call_window_proc16( HWND16 hwnd, UINT16 msg, WPARAM16 wParam, LPA
+     /* Window procedures want ax = hInstance, ds = es = ss */
+ 
+     memset(&context, 0, sizeof(context));
+-    context.SegDs = context.SegEs = SELECTOROF(NtCurrentTeb()->WOW32Reserved);
++    context.SegDs = context.SegEs = SELECTOROF(NtCurrentTeb()->SystemReserved1[0]);
+     if (!(context.Eax = GetWindowWord( HWND_32(hwnd), GWLP_HINSTANCE ))) context.Eax = context.SegDs;
+     context.SegCs = SELECTOROF(func);
+     context.Eip   = OFFSETOF(func);
+-    context.Ebp   = OFFSETOF(NtCurrentTeb()->WOW32Reserved) + FIELD_OFFSET(STACK16FRAME, bp);
++    context.Ebp   = OFFSETOF(NtCurrentTeb()->SystemReserved1[0]) + FIELD_OFFSET(STACK16FRAME, bp);
+ 
+     if (lParam)
+     {
+@@ -267,7 +267,7 @@ static LRESULT call_window_proc16( HWND16 hwnd, UINT16 msg, WPARAM16 wParam, LPA
+         if (size)
+         {
+             memcpy( &args.u, MapSL(lParam), size );
+-            lParam = PtrToUlong(NtCurrentTeb()->WOW32Reserved) - size;
++            lParam = PtrToUlong(NtCurrentTeb()->SystemReserved1[0]) - size;
+         }
+     }
+ 
+@@ -2092,7 +2092,7 @@ static LRESULT combo_proc16( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+ 
+ static void edit_lock_buffer( HWND hwnd )
+ {
+-    STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->WOW32Reserved));
++    STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->SystemReserved1[0]));
+     HLOCAL16 hloc16 = GetWindowWord( hwnd, GWW_HANDLE16 );
+     HANDLE16 oldDS;
+     HLOCAL hloc32;
+@@ -2118,7 +2118,7 @@ static void edit_lock_buffer( HWND hwnd )
+ 
+ static void edit_unlock_buffer( HWND hwnd )
+ {
+-    STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->WOW32Reserved));
++    STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->SystemReserved1[0]));
+     HLOCAL16 hloc16 = GetWindowWord( hwnd, GWW_HANDLE16 );
+     HANDLE16 oldDS;
+     HLOCAL hloc32;
+@@ -2155,7 +2155,7 @@ static HLOCAL16 edit_get_handle( HWND hwnd )
+     if (!(hloc = (HLOCAL)wow_handlers32.edit_proc( hwnd, EM_GETHANDLE, 0, 0, FALSE ))) return 0;
+     alloc_size = LocalSize( hloc );
+ 
+-    stack16 = MapSL(PtrToUlong(NtCurrentTeb()->WOW32Reserved));
++    stack16 = MapSL(PtrToUlong(NtCurrentTeb()->SystemReserved1[0]));
+     oldDS = stack16->ds;
+     stack16->ds = GetWindowLongPtrW( hwnd, GWLP_HINSTANCE );
+ 
+@@ -2193,7 +2193,7 @@ static HLOCAL16 edit_get_handle( HWND hwnd )
+ 
+ static void edit_set_handle( HWND hwnd, HLOCAL16 hloc16 )
+ {
+-    STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->WOW32Reserved));
++    STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->SystemReserved1[0]));
+     HINSTANCE16 hInstance = GetWindowLongPtrW( hwnd, GWLP_HINSTANCE );
+     HANDLE16 oldDS = stack16->ds;
+     HLOCAL hloc32;
+@@ -2223,7 +2223,7 @@ static void edit_destroy_handle( HWND hwnd )
+     HLOCAL16 hloc16 = GetWindowWord( hwnd, GWW_HANDLE16 );
+     if (hloc16)
+     {
+-        STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->WOW32Reserved));
++        STACK16FRAME* stack16 = MapSL(PtrToUlong(NtCurrentTeb()->SystemReserved1[0]));
+         HANDLE16 oldDS = stack16->ds;
+ 
+         stack16->ds = GetWindowLongPtrW( hwnd, GWLP_HINSTANCE );
+diff --git a/dlls/user.exe16/user.c b/dlls/user.exe16/user.c
+index 27b92793836..deec596f766 100644
+--- a/dlls/user.exe16/user.c
++++ b/dlls/user.exe16/user.c
+@@ -1394,7 +1394,7 @@ DWORD WINAPI GetTabbedTextExtent16( HDC16 hdc, LPCSTR lpstr, INT16 count,
+  */
+ DWORD WINAPI UserSeeUserDo16(WORD wReqType, WORD wParam1, WORD wParam2, WORD wParam3)
+ {
+-    STACK16FRAME* stack16 = MapSL((SEGPTR)NtCurrentTeb()->WOW32Reserved);
++    STACK16FRAME* stack16 = MapSL((SEGPTR)NtCurrentTeb()->SystemReserved1[0]);
+     HANDLE16 oldDS = stack16->ds;
+     DWORD ret = (DWORD)-1;
+ 
+@@ -1787,7 +1787,7 @@ UINT16 WINAPI RealizePalette16( HDC16 hdc )
+  */
+ WORD WINAPI GetFreeSystemResources16( WORD resType )
+ {
+-    STACK16FRAME* stack16 = MapSL((SEGPTR)NtCurrentTeb()->WOW32Reserved);
++    STACK16FRAME* stack16 = MapSL((SEGPTR)NtCurrentTeb()->SystemReserved1[0]);
+     HANDLE16 oldDS = stack16->ds;
+     int userPercent, gdiPercent;
+ 
+diff --git a/dlls/user.exe16/window.c b/dlls/user.exe16/window.c
+index bf86719325b..1f53bdc9540 100644
+--- a/dlls/user.exe16/window.c
++++ b/dlls/user.exe16/window.c
+@@ -456,7 +456,7 @@ HWND16 WINAPI GetParent16( HWND16 hwnd )
+  */
+ BOOL16 WINAPI IsWindow16( HWND16 hwnd )
+ {
+-    STACK16FRAME *frame = MapSL( (SEGPTR)NtCurrentTeb()->WOW32Reserved );
++    STACK16FRAME *frame = MapSL( (SEGPTR)NtCurrentTeb()->SystemReserved1[0] );
+     frame->es = USER_HeapSel;
+     /* don't use WIN_Handle32 here, we don't care about the full handle */
+     return IsWindow( HWND_32(hwnd) );
+diff --git a/include/winternl.h b/include/winternl.h
+index 3ff15f28c15..34d2737b705 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -362,7 +362,7 @@ typedef struct _TEB
+     PVOID                        WOW32Reserved;                     /* 0c0/0100 */
+     ULONG                        CurrentLocale;                     /* 0c4/0108 */
+     ULONG                        FpSoftwareStatusRegister;          /* 0c8/010c */
+-    PVOID                        SystemReserved1[54];               /* 0cc/0110 used for kernel32 private data in Wine */
++    PVOID                        SystemReserved1[54];               /* 0cc/0110 used for krnl386.exe16 private data in Wine */
+     LONG                         ExceptionCode;                     /* 1a4/02c0 */
+     ACTIVATION_CONTEXT_STACK     ActivationContextStack;            /* 1a8/02c8 */
+     BYTE                         SpareBytes1[24];                   /* 1bc/02e8 */
+diff --git a/tools/winebuild/relay.c b/tools/winebuild/relay.c
+index 29d0a74c833..01bb97e02b4 100644
+--- a/tools/winebuild/relay.c
++++ b/tools/winebuild/relay.c
+@@ -31,7 +31,7 @@
+ #include "build.h"
+ 
+ /* offset of the stack pointer relative to %fs:(0) */
+-#define STACKOFFSET 0xc0  /* FIELD_OFFSET(TEB,WOW32Reserved) */
++#define STACKOFFSET 0xcc  /* FIELD_OFFSET(TEB,SystemReserved1[0]) */
+ 
+ /* fix this if the x86_thread_data structure is changed */
+ #define GS_OFFSET  0x1d8  /* FIELD_OFFSET(TEB,SystemReserved2) + FIELD_OFFSET(struct x86_thread_data,gs) */
+
+From cd5fc2a332d5b83c5aaa742e8ad0c1a5cde6ae08 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michael=20M=C3=BCller?= <michael@fds-team.de>
+Date: Thu, 11 May 2017 05:32:55 +0200
+Subject: [PATCH 28/32] winebuild: Create syscall list for ntdll exports.
+
+---
+ tools/winebuild/build.h  |  5 ++++
+ tools/winebuild/parser.c | 53 ++++++++++++++++++++++++++++++++++++++++
+ tools/winebuild/spec16.c | 21 ----------------
+ tools/winebuild/utils.c  | 20 +++++++++++++++
+ 4 files changed, 78 insertions(+), 21 deletions(-)
+
+diff --git a/tools/winebuild/build.h b/tools/winebuild/build.h
+index 64a0f0cc770..48c45951a53 100644
+--- a/tools/winebuild/build.h
++++ b/tools/winebuild/build.h
+@@ -131,6 +131,7 @@ typedef struct
+     int              alloc_entry_points; /* number of allocated entry points */
+     int              nb_names;           /* number of entry points with names */
+     unsigned int     nb_resources;       /* number of resources */
++    int              nb_syscalls;        /* number of syscalls */
+     int              characteristics;    /* characteristics for the PE header */
+     int              dll_characteristics;/* DLL characteristics for the PE header */
+     int              subsystem;          /* subsystem id */
+@@ -140,6 +141,7 @@ typedef struct
+     ORDDEF         **names;              /* array of entry point names (points into entry_points) */
+     ORDDEF         **ordinals;           /* array of dll ordinals (points into entry_points) */
+     struct resource *resources;          /* array of dll resources (format differs between Win16/Win32) */
++    ORDDEF         **syscalls;           /* array of syscalls (points into entry_points) */
+ } DLLSPEC;
+ 
+ enum target_cpu
+@@ -182,6 +184,7 @@ struct strarray
+ #define FLAG_FORWARD   0x1000  /* function is a forwarded name */
+ #define FLAG_EXT_LINK  0x2000  /* function links to an external symbol */
+ #define FLAG_EXPORT32  0x4000  /* 32-bit export in 16-bit spec file */
++#define FLAG_SYSCALL   0x8000  /* function should be called through a syscall thunk */
+ 
+ #define FLAG_CPU(cpu)  (0x10000 << (cpu))
+ #define FLAG_CPU_MASK  (FLAG_CPU(CPU_LAST + 1) - FLAG_CPU(0))
+@@ -334,6 +337,8 @@ extern void add_16bit_exports( DLLSPEC *spec32, DLLSPEC *spec16 );
+ extern int parse_spec_file( FILE *file, DLLSPEC *spec );
+ extern int parse_def_file( FILE *file, DLLSPEC *spec );
+ 
++extern int sort_func_list( ORDDEF **list, int count, int (*compare)(const void *, const void *) );
++
+ /* buffer management */
+ 
+ extern int byte_swapped;
+diff --git a/tools/winebuild/parser.c b/tools/winebuild/parser.c
+index 0207b8ac3c3..ae4578208d1 100644
+--- a/tools/winebuild/parser.c
++++ b/tools/winebuild/parser.c
+@@ -543,6 +543,24 @@ static const char *parse_spec_flags( DLLSPEC *spec, ORDDEF *odp )
+ }
+ 
+ 
++static int needs_syscall( ORDDEF *odp, DLLSPEC *spec )
++{
++    if (target_cpu != CPU_x86 && target_cpu != CPU_x86_64)
++        return 0;
++    if (odp->flags & (FLAG_FORWARD | FLAG_REGISTER))
++        return 0;
++    if (odp->type != TYPE_STDCALL)
++        return 0;
++    if (!spec->dll_name || strcmp(spec->dll_name, "ntdll"))
++        return 0;
++    if (!odp->name)
++        return 0;
++    if (strncmp(odp->name, "Nt", 2) && strncmp(odp->name, "Zw", 2))
++        return 0;
++    return 1;
++}
++
++
+ /*******************************************************************
+  *         parse_spec_ordinal
+  *
+@@ -618,6 +636,8 @@ static int parse_spec_ordinal( int ordinal, DLLSPEC *spec )
+         assert( 0 );
+     }
+ 
++    if (needs_syscall( odp, spec )) odp->flags |= FLAG_SYSCALL;
++
+     if ((odp->flags & FLAG_CPU_MASK) && !(odp->flags & FLAG_CPU(target_cpu)))
+     {
+         /* ignore this entry point */
+@@ -815,6 +835,37 @@ static void assign_ordinals( DLLSPEC *spec )
+ }
+ 
+ 
++static int link_name_compare( const void *e1, const void *e2 )
++{
++    const ORDDEF *odp1 = *(const ORDDEF * const *)e1;
++    const ORDDEF *odp2 = *(const ORDDEF * const *)e2;
++    return strcmp(odp1->link_name, odp2->link_name);
++}
++
++
++static void assign_syscalls( DLLSPEC *spec )
++{
++    int i;
++
++    spec->syscalls = xmalloc( (spec->limit - spec->base + 1) * sizeof(*spec->syscalls) );
++    spec->nb_syscalls = 0;
++
++    for (i = 0; i <= spec->limit; i++)
++    {
++        ORDDEF *odp = spec->ordinals[i];
++        if (!odp || !(odp->flags & FLAG_SYSCALL)) continue;
++        spec->syscalls[spec->nb_syscalls++] = odp;
++    }
++
++    spec->nb_syscalls = sort_func_list( spec->syscalls, spec->nb_syscalls, link_name_compare );
++    if (!spec->nb_syscalls)
++    {
++        free( spec->syscalls );
++        spec->syscalls = NULL;
++    }
++}
++
++
+ /*******************************************************************
+  *         add_16bit_exports
+  *
+@@ -912,6 +963,8 @@ int parse_spec_file( FILE *file, DLLSPEC *spec )
+     current_line = 0;  /* no longer parsing the input file */
+     assign_names( spec );
+     assign_ordinals( spec );
++    assign_syscalls( spec );
++
+     return !nb_errors;
+ }
+ 
+diff --git a/tools/winebuild/spec16.c b/tools/winebuild/spec16.c
+index f66dcfd9192..34afe450438 100644
+--- a/tools/winebuild/spec16.c
++++ b/tools/winebuild/spec16.c
+@@ -495,27 +495,6 @@ static int relay_type_compare( const void *e1, const void *e2 )
+ }
+ 
+ 
+-/*******************************************************************
+- *         sort_func_list
+- *
+- * Sort a list of functions, removing duplicates.
+- */
+-static int sort_func_list( ORDDEF **list, int count,
+-                           int (*compare)(const void *, const void *) )
+-{
+-    int i, j;
+-
+-    if (!count) return 0;
+-    qsort( list, count, sizeof(*list), compare );
+-
+-    for (i = j = 0; i < count; i++)
+-    {
+-        if (compare( &list[j], &list[i] )) list[++j] = list[i];
+-    }
+-    return j + 1;
+-}
+-
+-
+ /*******************************************************************
+  *         output_module16
+  *
+diff --git a/tools/winebuild/utils.c b/tools/winebuild/utils.c
+index 74c98c02801..bfda27793f5 100644
+--- a/tools/winebuild/utils.c
++++ b/tools/winebuild/utils.c
+@@ -869,6 +869,7 @@ void free_dll_spec( DLLSPEC *spec )
+     free( spec->names );
+     free( spec->ordinals );
+     free( spec->resources );
++    free( spec->syscalls );
+     free( spec );
+ }
+ 
+@@ -1304,3 +1305,22 @@ const char *get_asm_string_section(void)
+     default: return get_asm_wine_section();
+     }
+ }
++
++/*******************************************************************
++ *         sort_func_list
++ *
++ * Sort a list of functions, removing duplicates.
++ */
++int sort_func_list( ORDDEF **list, int count, int (*compare)(const void *, const void *) )
++{
++    int i, j;
++
++    if (!count) return 0;
++    qsort( list, count, sizeof(*list), compare );
++
++    for (i = j = 0; i < count; i++)
++    {
++        if (compare( &list[j], &list[i] )) list[++j] = list[i];
++    }
++    return j + 1;
++}
+
+From bac401e9d7014d379a9d5b3b0e8ece857eb881c0 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Michael=20M=C3=BCller?= <michael@fds-team.de>
+Date: Thu, 11 May 2017 05:32:55 +0200
+Subject: [PATCH 29/32] winebuild: Generate syscall thunks for ntdll exports.
+
+Based on a patch by Erich E. Hoover.
+---
+ dlls/kernel32/tests/loader.c   |  13 +-
+ dlls/ntdll/loader.c            |   3 +
+ dlls/ntdll/signal_i386.c       |   2 +-
+ dlls/ntdll/tests/exception.c   |   2 +
+ dlls/ntdll/thread.c            |   3 +-
+ dlls/ntdll/unix/thread.c       |   5 +-
+ dlls/ntdll/unix/unix_private.h |   4 +-
+ dlls/ntdll/unix/virtual.c      |  12 +-
+ dlls/ntdll/unixlib.h           |   2 +-
+ include/winternl.h             |   2 +-
+ server/mapping.c               |   6 +-
+ tools/winebuild/spec32.c       | 250 +++++++++++++++++++++++++++++++++
+ 12 files changed, 288 insertions(+), 16 deletions(-)
+
+diff --git a/dlls/kernel32/tests/loader.c b/dlls/kernel32/tests/loader.c
+index 00df10b514a..95cb422d6a2 100644
+--- a/dlls/kernel32/tests/loader.c
++++ b/dlls/kernel32/tests/loader.c
+@@ -1571,7 +1571,7 @@ static void test_filenames(void)
+ 
+ static void test_FakeDLL(void)
+ {
+-#ifdef __i386__
++#if defined(__i386__) || defined(__x86_64__)
+     NTSTATUS (WINAPI *pNtSetEvent)(HANDLE, ULONG *) = NULL;
+     IMAGE_EXPORT_DIRECTORY *dir;
+     HMODULE module = GetModuleHandleA("ntdll.dll");
+@@ -1594,9 +1594,7 @@ static void test_FakeDLL(void)
+     ok(ptr != NULL, "MapViewOfFile failed with error %u\n", GetLastError());
+ 
+     dir = RtlImageDirectoryEntryToData(ptr, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &size);
+-todo_wine
+     ok(dir != NULL, "RtlImageDirectoryEntryToData failed\n");
+-    if (dir == NULL) goto done;
+ 
+     names    = RVAToAddr(dir->AddressOfNames, ptr);
+     ordinals = RVAToAddr(dir->AddressOfNameOrdinals, ptr);
+@@ -1615,8 +1613,13 @@ todo_wine
+ 
+         dll_func = (BYTE *)GetProcAddress(module, func_name);
+         ok(dll_func != NULL, "%s: GetProcAddress returned NULL\n", func_name);
++#if defined(__i386__)
+         if (dll_func[0] == 0x90 && dll_func[1] == 0x90 &&
+             dll_func[2] == 0x90 && dll_func[3] == 0x90)
++#elif defined(__x86_64__)
++        if (dll_func[0] == 0x48 && dll_func[1] == 0x83 &&
++            dll_func[2] == 0xec && dll_func[3] == 0x08)
++#endif
+         {
+             todo_wine ok(0, "%s: Export is a stub-function, skipping\n", func_name);
+             continue;
+@@ -1637,6 +1640,7 @@ todo_wine
+ 
+         /* check function content */
+         map_func = RVAToAddr(map_rva, ptr);
++    todo_wine
+         ok(!memcmp(map_func, dll_func, 0x20), "%s: Function content does not match!\n", func_name);
+ 
+         if (!strcmp(func_name, "NtSetEvent"))
+@@ -1650,10 +1654,11 @@ todo_wine
+         ok(event != NULL, "CreateEvent failed with error %u\n", GetLastError());
+         pNtSetEvent(event, 0);
+         ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "Event was not signaled\n");
++        pNtSetEvent(event, 0);
++        ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "Event was not signaled\n");
+         CloseHandle(event);
+     }
+ 
+-done:
+     UnmapViewOfFile(ptr);
+     CloseHandle(map);
+     CloseHandle(file);
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index f9773241c10..8042a01d823 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -3391,6 +3391,7 @@ PIMAGE_NT_HEADERS WINAPI RtlImageNtHeader(HMODULE hModule)
+     return ret;
+ }
+ 
++extern void DECLSPEC_NORETURN __wine_syscall_dispatcher( void );
+ 
+ /******************************************************************
+  *		LdrInitializeThunk (NTDLL.@)
+@@ -3407,6 +3408,8 @@ void WINAPI LdrInitializeThunk( CONTEXT *context, void **entry, ULONG_PTR unknow
+     WINE_MODREF *wm;
+     LPCWSTR load_path = NtCurrentTeb()->Peb->ProcessParameters->DllPath.Buffer;
+ 
++    NtCurrentTeb()->WOW32Reserved = __wine_syscall_dispatcher;
++
+     if (process_detaching) return;
+ 
+     RtlEnterCriticalSection( &loader_section );
+diff --git a/dlls/ntdll/signal_i386.c b/dlls/ntdll/signal_i386.c
+index d91d19f043a..745a6a31b12 100644
+--- a/dlls/ntdll/signal_i386.c
++++ b/dlls/ntdll/signal_i386.c
+@@ -360,7 +360,7 @@ NTSTATUS CDECL DECLSPEC_HIDDEN __regs_NtGetContextThread( DWORD edi, DWORD esi,
+     {
+         context->Ebp    = ebp;
+         context->Esp    = (DWORD)&retaddr;
+-        context->Eip    = *(&edi - 1);
++        context->Eip    = (DWORD)NtGetContextThread + 18;
+         context->EFlags = eflags;
+     }
+     return unix_funcs->NtGetContextThread( handle, context );
+diff --git a/dlls/ntdll/tests/exception.c b/dlls/ntdll/tests/exception.c
+index 411439f180f..cd019fd5add 100644
+--- a/dlls/ntdll/tests/exception.c
++++ b/dlls/ntdll/tests/exception.c
+@@ -1643,6 +1643,8 @@ static void test_thread_context(void)
+     ok( (char *)context.Eip >= (char *)pNtGetContextThread - 0x40000 &&
+         (char *)context.Eip <= (char *)pNtGetContextThread + 0x40000,
+         "wrong Eip %08x/%08x\n", context.Eip, (DWORD)pNtGetContextThread );
++    ok( *(WORD *)context.Eip == 0xc483 || *(WORD *)context.Eip == 0x08c2 || *(WORD *)context.Eip == 0x8dc3,
++        "expected 0xc483 or 0x08c2 or 0x8dc3, got %04x\n", *(WORD *)context.Eip );
+     /* segment registers clear the high word */
+     ok( context.SegCs == LOWORD(expect.SegCs), "wrong SegCs %08x/%08x\n", context.SegCs, expect.SegCs );
+     ok( context.SegDs == LOWORD(expect.SegDs), "wrong SegDs %08x/%08x\n", context.SegDs, expect.SegDs );
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index ade1c9eb576..3efbda90372 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -94,6 +94,7 @@ int __cdecl __wine_dbg_output( const char *str )
+     return unix_funcs->dbg_output( str );
+ }
+ 
++extern void DECLSPEC_NORETURN __wine_syscall_dispatcher( void );
+ 
+ /***********************************************************************
+  *           thread_init
+@@ -105,7 +106,7 @@ int __cdecl __wine_dbg_output( const char *str )
+ TEB *thread_init( SIZE_T *info_size )
+ {
+     ULONG_PTR val;
+-    TEB *teb = unix_funcs->init_threading( &nb_threads, &__wine_ldt_copy, info_size );
++    TEB *teb = unix_funcs->init_threading( &nb_threads, &__wine_ldt_copy, info_size, __wine_syscall_dispatcher );
+ 
+     peb = teb->Peb;
+     peb->FastPebLock        = &peb_lock;
+diff --git a/dlls/ntdll/unix/thread.c b/dlls/ntdll/unix/thread.c
+index f3dddd2b02a..98f4a1c44b4 100644
+--- a/dlls/ntdll/unix/thread.c
++++ b/dlls/ntdll/unix/thread.c
+@@ -84,7 +84,7 @@ static void pthread_exit_wrapper( int status )
+ /***********************************************************************
+  *           init_threading
+  */
+-TEB * CDECL init_threading( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZE_T *size )
++TEB * CDECL init_threading( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZE_T *size, void *syscall_handler )
+ {
+     TEB *teb;
+     BOOL suspend;
+@@ -96,6 +96,7 @@ TEB * CDECL init_threading( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZ
+     nb_threads = nb_threads_ptr;
+ 
+     teb = virtual_alloc_first_teb();
++    teb->WOW32Reserved = syscall_handler;
+ 
+     signal_init_threading();
+     signal_alloc_thread( teb );
+@@ -103,7 +104,7 @@ TEB * CDECL init_threading( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZ
+     dbg_init();
+     server_init_process();
+     info_size = server_init_thread( teb->Peb, &suspend );
+-    virtual_map_user_shared_data();
++    virtual_map_user_shared_data(syscall_handler);
+     virtual_create_builtin_view( ntdll_module );
+     init_cpu_info();
+     init_files();
+diff --git a/dlls/ntdll/unix/unix_private.h b/dlls/ntdll/unix/unix_private.h
+index 4c237e6bbe4..eabff18b14b 100644
+--- a/dlls/ntdll/unix/unix_private.h
++++ b/dlls/ntdll/unix/unix_private.h
+@@ -115,7 +115,7 @@ extern NTSTATUS CDECL server_handle_to_fd( HANDLE handle, unsigned int access, i
+                                            unsigned int *options ) DECLSPEC_HIDDEN;
+ extern void CDECL server_release_fd( HANDLE handle, int unix_fd ) DECLSPEC_HIDDEN;
+ extern void CDECL server_init_process_done( void *relay ) DECLSPEC_HIDDEN;
+-extern TEB * CDECL init_threading( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZE_T *size ) DECLSPEC_HIDDEN;
++extern TEB * CDECL init_threading( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZE_T *size, void *syscall_handler ) DECLSPEC_HIDDEN;
+ extern void CDECL DECLSPEC_NORETURN exit_thread( int status ) DECLSPEC_HIDDEN;
+ extern void CDECL DECLSPEC_NORETURN exit_process( int status ) DECLSPEC_HIDDEN;
+ extern NTSTATUS CDECL exec_process( UNICODE_STRING *path, UNICODE_STRING *cmdline, NTSTATUS status ) DECLSPEC_HIDDEN;
+@@ -190,7 +190,7 @@ extern TEB *virtual_alloc_first_teb(void) DECLSPEC_HIDDEN;
+ extern NTSTATUS virtual_alloc_teb( TEB **ret_teb ) DECLSPEC_HIDDEN;
+ extern void virtual_free_teb( TEB *teb ) DECLSPEC_HIDDEN;
+ extern NTSTATUS virtual_clear_tls_index( ULONG index ) DECLSPEC_HIDDEN;
+-extern void virtual_map_user_shared_data(void) DECLSPEC_HIDDEN;
++extern void virtual_map_user_shared_data(void *) DECLSPEC_HIDDEN;
+ extern NTSTATUS virtual_handle_fault( LPCVOID addr, DWORD err, BOOL on_signal_stack ) DECLSPEC_HIDDEN;
+ extern unsigned int virtual_locked_server_call( void *req_ptr ) DECLSPEC_HIDDEN;
+ extern ssize_t virtual_locked_read( int fd, void *addr, size_t size ) DECLSPEC_HIDDEN;
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+index ac79423d00a..252618875a5 100644
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -2566,14 +2566,14 @@ TEB *virtual_alloc_first_teb(void)
+     TEB *teb;
+     PEB *peb;
+     NTSTATUS status;
+-    SIZE_T data_size = page_size;
++    SIZE_T data_size = page_size * 2;
+     SIZE_T peb_size = page_size;
+     SIZE_T teb_size = signal_stack_mask + 1;
+     SIZE_T total = 32 * teb_size;
+ 
+     /* reserve space for shared user data */
+     status = NtAllocateVirtualMemory( NtCurrentProcess(), (void **)&user_shared_data, 0, &data_size,
+-                                      MEM_RESERVE | MEM_COMMIT, PAGE_READONLY );
++                                      MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
+     if (status)
+     {
+         ERR( "wine: failed to map the shared user data: %08x\n", status );
+@@ -2793,11 +2793,12 @@ void virtual_clear_thread_stack( void *stack_end )
+     if (force_exec_prot) mprotect( stack, size, PROT_READ | PROT_WRITE | PROT_EXEC );
+ }
+ 
++extern void DECLSPEC_NORETURN __wine_syscall_dispatcher( void );
+ 
+ /***********************************************************************
+  *           virtual_map_user_shared_data
+  */
+-void virtual_map_user_shared_data(void)
++void virtual_map_user_shared_data(void *syscall_handler)
+ {
+     static const WCHAR wine_usdW[] = {'\\','K','e','r','n','e','l','O','b','j','e','c','t','s',
+                                       '\\','_','_','w','i','n','e','_','u','s','e','r','_','s','h','a','r','e','d','_','d','a','t','a',0};
+@@ -2820,6 +2821,11 @@ void virtual_map_user_shared_data(void)
+         ERR( "failed to remap the process USD: %d\n", res );
+         exit(1);
+     }
++
++#if defined(__APPLE__) && defined(__x86_64__)
++    *((void **)((char*)user_shared_data + 0x1000)) = syscall_handler;
++#endif
++
+     if (needs_close) close( fd );
+     NtClose( section );
+ }
+diff --git a/dlls/ntdll/unixlib.h b/dlls/ntdll/unixlib.h
+index 328038756f9..16f91d1dcd6 100644
+--- a/dlls/ntdll/unixlib.h
++++ b/dlls/ntdll/unixlib.h
+@@ -303,7 +303,7 @@ struct unix_funcs
+     void          (CDECL *virtual_set_large_address_space)(void);
+ 
+     /* thread/process functions */
+-    TEB *         (CDECL *init_threading)( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZE_T *size );
++    TEB *         (CDECL *init_threading)( int *nb_threads_ptr, struct ldt_copy **ldt_copy, SIZE_T *size, void *syscall_handler );
+     void          (CDECL *exit_thread)( int status );
+     void          (CDECL *exit_process)( int status );
+     NTSTATUS      (CDECL *exec_process)( UNICODE_STRING *path, UNICODE_STRING *cmdline, NTSTATUS status );
+diff --git a/include/winternl.h b/include/winternl.h
+index 34d2737b705..ef848272f7f 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -359,7 +359,7 @@ typedef struct _TEB
+     PVOID                        CsrClientThread;                   /* 03c/0070 */
+     PVOID                        Win32ThreadInfo;                   /* 040/0078 */
+     ULONG                        Win32ClientInfo[31];               /* 044/0080 used for user32 private data in Wine */
+-    PVOID                        WOW32Reserved;                     /* 0c0/0100 */
++    PVOID                        WOW32Reserved;                     /* 0c0/0100 used for ntdll syscall thunks */
+     ULONG                        CurrentLocale;                     /* 0c4/0108 */
+     ULONG                        FpSoftwareStatusRegister;          /* 0c8/010c */
+     PVOID                        SystemReserved1[54];               /* 0cc/0110 used for krnl386.exe16 private data in Wine */
+diff --git a/server/mapping.c b/server/mapping.c
+index 0941dd87c05..002f3215af2 100644
+--- a/server/mapping.c
++++ b/server/mapping.c
+@@ -964,7 +964,11 @@ struct object *create_user_data_mapping( struct object *root, const struct unico
+     if (!(mapping = create_mapping( root, name, OBJ_OPENIF, sizeof(KSHARED_USER_DATA),
+                                     SEC_COMMIT, 0, FILE_READ_DATA | FILE_WRITE_DATA, NULL ))) return NULL;
+     ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED, get_unix_fd( mapping->fd ), 0 );
+-    if (ptr != MAP_FAILED) user_shared_data = ptr;
++    if (ptr != MAP_FAILED)
++    {
++        user_shared_data = ptr;
++        user_shared_data->SystemCallPad[0] = 1;
++    }
+     return &mapping->obj;
+ }
+ 
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 1a4b33a5d12..53bd65a8622 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -361,6 +361,250 @@ static void output_relay_debug( DLLSPEC *spec )
+     }
+ }
+ 
++/*******************************************************************
++ *         output_syscall_thunks_x86
++ *
++ * Output entry points for system call functions
++ */
++static void output_syscall_thunks_x86( DLLSPEC *spec )
++{
++    char name[1024];
++    int i;
++
++    if (!spec->nb_syscalls)
++        return;
++
++    output( "\n/* syscall thunks */\n\n" );
++    output( "\t.text\n" );
++    for (i = 0; i < spec->nb_syscalls; i++)
++    {
++        ORDDEF *odp = spec->syscalls[i];
++        sprintf(name, "__wrap_%s", odp->link_name);
++
++        /* Chromium attempts to hook system call thunks. It expects them to
++         * have a very specific form, or it will fail. The below matches what
++         * Chromium expects from 64-bit Windows 8. */
++
++        output( "\t.align %d\n", get_alignment(16) );
++        output( "\t%s\n", func_declaration(name) );
++        output( "%s\n", asm_globl(name) );
++        output_cfi( ".cfi_startproc" );
++        output( "\t.byte 0xb8\n" );                               /* mov eax, SYSCALL */
++        output( "\t.long %d\n", i );
++        output( "\t.byte 0x64,0xff,0x15,0xc0,0x00,0x00,0x00\n" ); /* call dword ptr fs:[0C0h] */
++        output( "\t.byte 0xc2\n" );                               /* ret X */
++        output( "\t.short %d\n", get_args_size(odp) );
++        output_cfi( ".cfi_endproc" );
++        output_function_size( name );
++    }
++
++    for (i = 0; i < 0x20; i++)
++        output( "\t.byte 0\n" );
++
++    output( "\n/* syscall table */\n\n" );
++    output( "\t.data\n" );
++    output( "%s\n", asm_globl("__wine_syscall_table") );
++    for (i = 0; i < spec->nb_syscalls; i++)
++    {
++        ORDDEF *odp = spec->syscalls[i];
++        output ("\t%s __real_%s\n", get_asm_ptr_keyword(), asm_name(odp->link_name) );
++    }
++
++    output( "\n/* syscall argument stack size table */\n\n" );
++    output( "\t.data\n" );
++    output( "%s\n", asm_globl("__wine_syscall_stack_size") );
++    for (i = 0; i < spec->nb_syscalls; i++)
++    {
++        ORDDEF *odp = spec->syscalls[i];
++        output( "\t.byte %d\n", get_args_size(odp) );
++    }
++
++    output( "\n/* syscall dispatcher */\n\n" );
++    output( "\t.text\n" );
++    output( "\t.align %d\n", get_alignment(16) );
++    output( "\t%s\n", func_declaration("__wine_syscall_dispatcher") );
++    output( "%s\n", asm_globl("__wine_syscall_dispatcher") );
++    output_cfi( ".cfi_startproc" );
++    output( "\tpushl %%ebp\n" );
++    output_cfi( ".cfi_adjust_cfa_offset 4\n" );
++    output_cfi( ".cfi_rel_offset %%ebp,0\n" );
++    output( "\tmovl %%esp,%%ebp\n" );
++    output_cfi( ".cfi_def_cfa_register %%ebp\n" );
++    output( "\tpushl %%esi\n" );
++    output_cfi( ".cfi_rel_offset %%esi,-4\n" );
++    output( "\tpushl %%edi\n" );
++    output_cfi( ".cfi_rel_offset %%edi,-8\n" );
++    output( "\tleal 12(%%ebp),%%esi\n" );
++    if (UsePIC)
++    {
++        output( "\tcall 1f\n" );
++        output( "1:\tpopl %%edx\n" );
++        output( "movzbl (%s-1b)(%%edx,%%eax,1),%%ecx\n", asm_name("__wine_syscall_stack_size") );
++    }
++    else
++        output( "movzbl %s(%%eax),%%ecx\n", asm_name("__wine_syscall_stack_size") );
++
++    output( "\tsubl %%ecx,%%esp\n" );
++    output( "\tshrl $2,%%ecx\n" );
++    output( "\tmovl %%esp,%%edi\n" );
++    output( "\trep; movsl\n" );
++    if (UsePIC)
++        output( "\tcall *(%s-1b)(%%edx,%%eax,%d)\n", asm_name("__wine_syscall_table"), get_ptr_size() );
++    else
++        output( "\tcall *%s(,%%eax,%d)\n", asm_name("__wine_syscall_table"), get_ptr_size() );
++    output( "\tpop %%edi\n" );
++    output_cfi( ".cfi_same_value %%edi\n" );
++    output( "\tpop %%esi\n" );
++    output_cfi( ".cfi_same_value %%esi\n" );
++    output( "\tleave\n" );
++    output_cfi( ".cfi_def_cfa %%esp,4\n" );
++    output_cfi( ".cfi_same_value %%ebp\n" );
++    output( "\tret\n" );
++    output_cfi( ".cfi_endproc" );
++    output_function_size( "__wine_syscall_dispatcher" );
++}
++
++/*******************************************************************
++ *         output_syscall_thunks_x64
++ *
++ * Output entry points for system call functions
++ */
++static void output_syscall_thunks_x64( DLLSPEC *spec )
++{
++    char name[1024];
++    int i;
++
++    if (!spec->nb_syscalls)
++        return;
++
++    /* Reserve space for PE header directly before syscalls. */
++    output( "\n/* syscall thunks */\n\n" );
++    output( "\t.text\n" );
++    for (i = 0; i < spec->nb_syscalls; i++)
++    {
++        ORDDEF *odp = spec->syscalls[i];
++        sprintf(name, "__wrap_%s", odp->link_name);
++
++        /* Chromium depends on syscall thunks having the same form as on
++         * Windows. For 64-bit systems the only viable form we can emulate is
++         * having an int $0x2e fallback. Since actually using an interrupt is
++         * expensive, and since for some reason Chromium doesn't actually
++         * validate that instruction, we can just put a jmp there instead. */
++
++        output( "\t.align %d\n", get_alignment(16) );
++        output( "\t%s\n", func_declaration(name) );
++        output( "%s\n", asm_globl(name) );
++        output_cfi( ".cfi_startproc" );
++        output( "\t.byte 0x4c,0x8b,0xd1\n" );                               /* mov r10, rcx */
++        output( "\t.byte 0xb8\n" );                                         /* mov eax, SYSCALL */
++        output( "\t.long %d\n", i );
++        output( "\t.byte 0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01\n" );      /* test byte ptr [0x7ffe0308], 1 */
++        output( "\t.byte 0x75,0x03\n" );                                    /* jne (over syscall) */
++        output( "\t.byte 0x0f,0x05\n" );                                    /* syscall */
++        output( "\t.byte 0xc3\n" );                                         /* ret */
++        output( "\t.byte 0xeb,0x01\n" );                                    /* jmp over ret */
++        output( "\t.byte 0xc3\n" );                                         /* ret */
++        if (target_platform == PLATFORM_APPLE)
++        {
++            output( "\t.byte 0xff,0x14,0x25\n" );                           /* call [0x7ffe1000] */
++            output( "\t.long 0x7ffe1000\n" );
++        }
++        else
++        {
++            output( "\t.byte 0x65,0xff,0x14,0x25\n" );                      /* call qword ptr gs:[0x100] */
++            output( "\t.long 0x100\n");
++        }
++        /* This RET is never reached, but Legends of Runeterra demands that it
++         * exist anyway. */
++        output( "\t.byte 0xc3\n" );                                         /* ret */
++        output_cfi( ".cfi_endproc" );
++        output_function_size( name );
++    }
++
++    for (i = 0; i < 0x20; i++)
++        output( "\t.byte 0\n" );
++
++    output( "\n/* syscall table */\n\n" );
++    output( "\t.data\n" );
++    output( "%s\n", asm_globl("__wine_syscall_table") );
++    for (i = 0; i < spec->nb_syscalls; i++)
++    {
++        ORDDEF *odp = spec->syscalls[i];
++        output ("\t%s __real_%s\n", get_asm_ptr_keyword(), asm_name(odp->link_name) );
++    }
++
++    output( "\n/* syscall argument stack size table */\n\n" );
++    output( "\t.data\n" );
++    output( "%s\n", asm_globl("__wine_syscall_stack_size") );
++    for (i = 0; i < spec->nb_syscalls; i++)
++    {
++        ORDDEF *odp = spec->syscalls[i];
++        output( "\t.byte %d\n", max(get_args_size(odp), 32) - 32 );
++    }
++
++    output( "\n/* syscall dispatcher */\n\n" );
++    output( "\t.text\n" );
++    output( "\t.align %d\n", get_alignment(16) );
++    output( "\t%s\n", func_declaration("__wine_syscall_dispatcher") );
++    output( "%s\n", asm_globl("__wine_syscall_dispatcher") );
++
++    /* prologue */
++    output_cfi( ".cfi_startproc" );
++    output( "\tpushq %%rbp\n" );
++    output_cfi( ".cfi_adjust_cfa_offset 8" );
++    output_cfi( ".cfi_rel_offset %%rbp,0" );
++    output( "\tmovq %%rsp,%%rbp\n" );
++    output_cfi( ".cfi_def_cfa_register %%rbp" );
++    output( "\tpushq %%rsi\n" );
++    output_cfi( ".cfi_rel_offset %%rsi,-8" );
++    output( "\tpushq %%rdi\n" );
++    output_cfi( ".cfi_rel_offset %%rdi,-16" );
++
++    /* Legends of Runeterra hooks the first system call return instruction, and
++     * depends on us returning to it. Adjust the return address accordingly. */
++    if (target_platform == PLATFORM_APPLE)
++        output( "\tsubq $0xb,0x8(%%rbp)\n" );
++    else
++        output( "\tsubq $0xc,0x8(%%rbp)\n" );
++
++    /* copy over any arguments on the stack */
++    output( "\tleaq 0x38(%%rbp),%%rsi\n" );
++    if (UsePIC)
++    {
++        output( "\tleaq (%%rip), %%r11\n" );
++        output( "1:\tmovzbq (%s-1b)(%%r11,%%rax,1),%%rcx\n", asm_name("__wine_syscall_stack_size") );
++    }
++    else
++        output( "\tmovzbq %s(%%rax),%%rcx\n", asm_name("__wine_syscall_stack_size") );
++    output( "\tsubq %%rcx,%%rsp\n" );
++    output( "\tand $~0xf,%%rsp\n\t" ); /* ensure stack alignment. */
++    output( "\tshrq $3,%%rcx\n" );
++    output( "\tmovq %%rsp,%%rdi\n" );
++    output( "\trep; movsq\n" );
++
++    /* call the function */
++    output( "\tmovq %%r10,%%rcx\n" );
++    output( "\tsubq $0x20,%%rsp\n" );
++    if (UsePIC)
++        output( "\tcallq *(%s-1b)(%%r11,%%rax,%d)\n", asm_name("__wine_syscall_table"), get_ptr_size() );
++    else
++        output( "\tcallq *%s(,%%rax,%d)\n", asm_name("__wine_syscall_table"), get_ptr_size() );
++    output( "\tleaq -0x10(%%rbp),%%rsp\n" );
++
++    /* epilogue */
++    output( "\tpopq %%rdi\n" );
++    output_cfi( ".cfi_same_value %%rdi" );
++    output( "\tpopq %%rsi\n" );
++    output_cfi( ".cfi_same_value %%rsi" );
++    output_cfi( ".cfi_def_cfa_register %%rsp" );
++    output( "\tpopq %%rbp\n" );
++    output_cfi( ".cfi_adjust_cfa_offset -8" );
++    output_cfi( ".cfi_same_value %%rbp" );
++    output( "\tret\n" );
++    output_cfi( ".cfi_endproc" );
++    output_function_size( "__wine_syscall_dispatcher" );
++}
++
+ /*******************************************************************
+  *         output_exports
+  *
+@@ -913,6 +1157,10 @@ void output_spec32_file( DLLSPEC *spec )
+         output( "\t.L__wine_spec_data:\n" );
+     }
+ 
++    if (target_cpu == CPU_x86)
++        output_syscall_thunks_x86( spec );
++    else if (target_cpu == CPU_x86_64)
++        output_syscall_thunks_x64( spec );
+     output_stubs( spec );
+     output_relay_data( spec );
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+@@ -1242,6 +1490,8 @@ void output_wrap_file( DLLSPEC *spec )
+ 
+         name = asm_name( get_link_name( odp ) );
+         output( "-Wl,--wrap=%s\n", name );
++        if (odp->flags & FLAG_SYSCALL) continue;
++
+         output( "-Wl,--defsym=__wrap_%s=__real_%s\n", name, name );
+     }
+     if (spec32) free_dll_spec( spec32 );
+
+From 22c8e45f0c2a75422b8a6d68ac0ed04eb0983090 Mon Sep 17 00:00:00 2001
+From: Paul Gofman <pgofman@codeweavers.com>
+Date: Mon, 30 Dec 2019 13:27:53 +0300
+Subject: [PATCH 30/32] ntdll: Support x86_64 syscall emulation.
+
+The patch assigns the range of syscall numbers which does not
+overlap with native syscalls and assumes these numbers are
+used in the applications (i. e., that the applications
+get the number from syscall thunks). Linux specific Seccomp
+is used for trapping syscalls.
+---
+ configure.ac                    |   1 +
+ dlls/ntdll/signal_x86_64.c      |  10 ++++
+ dlls/ntdll/unix/signal_x86_64.c | 103 ++++++++++++++++++++++++++++++++
+ tools/winebuild/spec32.c        |   7 ++-
+ 4 files changed, 120 insertions(+), 1 deletion(-)
+
+diff --git a/configure.ac b/configure.ac
+index a78610c6490..eabd16b4732 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -464,6 +464,7 @@ AC_CHECK_HEADERS(\
+ 	linux/joystick.h \
+ 	linux/major.h \
+ 	linux/param.h \
++	linux/seccomp.h \
+ 	linux/serial.h \
+ 	linux/types.h \
+ 	linux/ucdrom.h \
+diff --git a/dlls/ntdll/signal_x86_64.c b/dlls/ntdll/signal_x86_64.c
+index 284522ffae7..92f0ec85cc8 100644
+--- a/dlls/ntdll/signal_x86_64.c
++++ b/dlls/ntdll/signal_x86_64.c
+@@ -24,6 +24,7 @@
+ #include "wine/port.h"
+ 
+ #include <assert.h>
++#include <errno.h>
+ #include <signal.h>
+ #include <stdlib.h>
+ #include <stdarg.h>
+@@ -59,6 +60,13 @@
+ # include <mach/mach.h>
+ #endif
+ 
++#if defined(HAVE_LINUX_FILTER_H) && defined(HAVE_LINUX_SECCOMP_H) && defined(HAVE_SYS_PRCTL_H)
++#define HAVE_SECCOMP 1
++# include <linux/filter.h>
++# include <linux/seccomp.h>
++# include <sys/prctl.h>
++#endif
++
+ #define NONAMELESSUNION
+ #define NONAMELESSSTRUCT
+ #include "ntstatus.h"
+@@ -76,6 +84,8 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(seh);
+ 
++extern void DECLSPEC_NORETURN __wine_syscall_dispatcher( void );
++
+ typedef struct _SCOPE_TABLE
+ {
+     ULONG Count;
+diff --git a/dlls/ntdll/unix/signal_x86_64.c b/dlls/ntdll/unix/signal_x86_64.c
+index 88ee18461a2..4ecccf4749b 100644
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -1242,6 +1242,106 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *ucontext )
+ }
+ 
+ 
++extern unsigned int __wine_nb_syscalls;
++
++#ifdef HAVE_SECCOMP
++static void sigsys_handler( int signal, siginfo_t *siginfo, void *sigcontext )
++{
++    unsigned int thunk_ret_offset;
++    ucontext_t *ctx = sigcontext;
++    unsigned int syscall_nr;
++    void ***rsp;
++
++    WARN("SIGSYS, rax %#llx.\n", ctx->uc_mcontext.gregs[REG_RAX]);
++
++    syscall_nr = ctx->uc_mcontext.gregs[REG_RAX] - 0xf000;
++    if (syscall_nr >= __wine_nb_syscalls)
++    {
++        ERR("Syscall %u is undefined.\n", syscall_nr);
++        return;
++    }
++
++    rsp = (void ***)&ctx->uc_mcontext.gregs[REG_RSP];
++    *rsp -= 1;
++
++#ifdef __APPLE__
++    thunk_ret_offset = 0xb;
++#else
++    thunk_ret_offset = 0xc;
++#endif
++
++    **rsp = (void *)(ctx->uc_mcontext.gregs[REG_RIP] + thunk_ret_offset);
++    ctx->uc_mcontext.gregs[REG_RIP] = (ULONG64)__wine_syscall_dispatcher;
++}
++#endif
++
++#ifdef HAVE_SECCOMP
++static int sc_seccomp(unsigned int operation, unsigned int flags, void *args)
++{
++#ifndef __NR_seccomp
++#   define __NR_seccomp 317
++#endif
++    return syscall(__NR_seccomp, operation, flags, args);
++}
++#endif
++
++static void install_bpf(struct sigaction *sig_act)
++{
++#ifdef HAVE_SECCOMP
++#   ifndef SECCOMP_FILTER_FLAG_SPEC_ALLOW
++#       define SECCOMP_FILTER_FLAG_SPEC_ALLOW (1UL << 2)
++#   endif
++
++#   ifndef SECCOMP_SET_MODE_FILTER
++#       define SECCOMP_SET_MODE_FILTER 1
++#   endif
++    static const unsigned int flags = SECCOMP_FILTER_FLAG_SPEC_ALLOW;
++    static struct sock_filter filter[] =
++    {
++       BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
++                (offsetof(struct seccomp_data, nr))),
++       BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0xf000, 0, 1),
++       BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_TRAP),
++       BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
++    };
++    struct sock_fprog prog;
++    int ret;
++
++    memset(&prog, 0, sizeof(prog));
++    prog.len = ARRAY_SIZE(filter);
++    prog.filter = filter;
++
++    if (!(ret = prctl(PR_GET_SECCOMP, 0, NULL, 0, 0)))
++    {
++        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0))
++        {
++            perror("prctl(PR_SET_NO_NEW_PRIVS, ...)");
++            exit(1);
++        }
++
++        if (sc_seccomp(SECCOMP_SET_MODE_FILTER, flags, &prog))
++
++        {
++            perror("prctl(PR_SET_SECCOMP, ...)");
++            exit(1);
++        }
++    }
++    else
++    {
++        if (ret == 2)
++            TRACE("Seccomp filters already installed.\n");
++        else
++            ERR("Seccomp filters cannot be installed, ret %d, error %s.\n", ret, strerror(errno));
++    }
++
++    sig_act->sa_sigaction = sigsys_handler;
++    sigaction(SIGSYS, sig_act, NULL);
++#else
++    WARN("Built without seccomp.\n");
++#endif
++}
++
++
+ /**********************************************************************
+  *           get_thread_ldt_entry
+  */
+@@ -1408,6 +1508,9 @@ void signal_init_process(void)
+     if (sigaction( SIGSEGV, &sig_act, NULL ) == -1) goto error;
+     if (sigaction( SIGILL, &sig_act, NULL ) == -1) goto error;
+     if (sigaction( SIGBUS, &sig_act, NULL ) == -1) goto error;
++
++    install_bpf(&sig_act);
++
+     return;
+ 
+  error:
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 53bd65a8622..5dd60bcc6f7 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -497,7 +497,7 @@ static void output_syscall_thunks_x64( DLLSPEC *spec )
+         output_cfi( ".cfi_startproc" );
+         output( "\t.byte 0x4c,0x8b,0xd1\n" );                               /* mov r10, rcx */
+         output( "\t.byte 0xb8\n" );                                         /* mov eax, SYSCALL */
+-        output( "\t.long %d\n", i );
++        output( "\t.long %d\n", i + 0xf000 );
+         output( "\t.byte 0xf6,0x04,0x25,0x08,0x03,0xfe,0x7f,0x01\n" );      /* test byte ptr [0x7ffe0308], 1 */
+         output( "\t.byte 0x75,0x03\n" );                                    /* jne (over syscall) */
+         output( "\t.byte 0x0f,0x05\n" );                                    /* syscall */
+@@ -542,6 +542,9 @@ static void output_syscall_thunks_x64( DLLSPEC *spec )
+         output( "\t.byte %d\n", max(get_args_size(odp), 32) - 32 );
+     }
+ 
++    output( "%s\n", asm_globl("__wine_nb_syscalls") );
++    output( "\t.long %u\n", spec->nb_syscalls );
++
+     output( "\n/* syscall dispatcher */\n\n" );
+     output( "\t.text\n" );
+     output( "\t.align %d\n", get_alignment(16) );
+@@ -567,6 +570,8 @@ static void output_syscall_thunks_x64( DLLSPEC *spec )
+     else
+         output( "\tsubq $0xc,0x8(%%rbp)\n" );
+ 
++    output( "\tsub $0xf000,%%rax\n" );
++
+     /* copy over any arguments on the stack */
+     output( "\tleaq 0x38(%%rbp),%%rsi\n" );
+     if (UsePIC)
+
+From aafc0ca28380c64b571901a9d0bbf360497896e7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 18 Jun 2020 18:11:26 +0200
+Subject: [PATCH 31/32] ntdll: Introduce __wine_fakedll_init function.
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Based on a patch by Michael Müller <michael@fds-team.de>
+---
+ dlls/ntdll/loader.c      |  2 ++
+ dlls/ntdll/thread.c      |  9 +++++++
+ dlls/ntdll/unix/loader.c | 55 +++++++++++++++++++++++++++++++++++++++-
+ dlls/ntdll/unixlib.h     |  3 ++-
+ include/winternl.h       |  2 +-
+ 5 files changed, 68 insertions(+), 3 deletions(-)
+
+diff --git a/dlls/ntdll/loader.c b/dlls/ntdll/loader.c
+index 8042a01d823..3031e09d008 100644
+--- a/dlls/ntdll/loader.c
++++ b/dlls/ntdll/loader.c
+@@ -3392,6 +3392,7 @@ PIMAGE_NT_HEADERS WINAPI RtlImageNtHeader(HMODULE hModule)
+ }
+ 
+ extern void DECLSPEC_NORETURN __wine_syscall_dispatcher( void );
++extern void WINAPI __wine_fakedll_init( IMAGE_NT_HEADERS * );
+ 
+ /******************************************************************
+  *		LdrInitializeThunk (NTDLL.@)
+@@ -3409,6 +3410,7 @@ void WINAPI LdrInitializeThunk( CONTEXT *context, void **entry, ULONG_PTR unknow
+     LPCWSTR load_path = NtCurrentTeb()->Peb->ProcessParameters->DllPath.Buffer;
+ 
+     NtCurrentTeb()->WOW32Reserved = __wine_syscall_dispatcher;
++    NtCurrentTeb()->Spare2 = (ULONG_PTR)__wine_fakedll_init;
+ 
+     if (process_detaching) return;
+ 
+diff --git a/dlls/ntdll/thread.c b/dlls/ntdll/thread.c
+index 3efbda90372..28864a5a47f 100644
+--- a/dlls/ntdll/thread.c
++++ b/dlls/ntdll/thread.c
+@@ -96,6 +96,14 @@ int __cdecl __wine_dbg_output( const char *str )
+ 
+ extern void DECLSPEC_NORETURN __wine_syscall_dispatcher( void );
+ 
++void WINAPI __wine_fakedll_init( IMAGE_NT_HEADERS *nt )
++{
++    HMODULE module = (HMODULE)((UINT_PTR)nt & ~0xffff);
++    IMAGE_NT_HEADERS tmp = *nt;
++    tmp.OptionalHeader.ImageBase = (DWORD_PTR)module;
++    unix_funcs->map_so_dll( &tmp, module );
++}
++
+ /***********************************************************************
+  *           thread_init
+  *
+@@ -107,6 +115,7 @@ TEB *thread_init( SIZE_T *info_size )
+ {
+     ULONG_PTR val;
+     TEB *teb = unix_funcs->init_threading( &nb_threads, &__wine_ldt_copy, info_size, __wine_syscall_dispatcher );
++    teb->Spare2 = (ULONG_PTR)__wine_fakedll_init;
+ 
+     peb = teb->Peb;
+     peb->FastPebLock        = &peb_lock;
+diff --git a/dlls/ntdll/unix/loader.c b/dlls/ntdll/unix/loader.c
+index 3a1f3b45133..bd328c327a9 100644
+--- a/dlls/ntdll/unix/loader.c
++++ b/dlls/ntdll/unix/loader.c
+@@ -623,13 +623,22 @@ static NTSTATUS remap_writable( void *addr, size_t size )
+ }
+ 
+ 
++struct __wine_spec_func_table
++{
++    size_t name_offset;
++    void *func_ptrs[0];
++};
++
++
+ /*************************************************************************
+  *		map_so_dll
+  *
+  * Map a builtin dll in memory and fixup RVAs.
+  */
+-static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
++static NTSTATUS CDECL map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+ {
++    static char const *subdirs[] = {"dlls", "programs"};
++
+     IMAGE_DATA_DIRECTORY *dir;
+     IMAGE_DOS_HEADER *dos;
+     IMAGE_NT_HEADERS *nt;
+@@ -638,6 +647,9 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+     int delta;
+     unsigned int i;
+     DWORD size = nt_descr->OptionalHeader.SizeOfHeaders;
++    struct __wine_spec_func_table *fake_table, *unix_table;
++    char path[MAX_PATH], *name, *dll_name;
++    void *handle;
+ 
+     if ((delta = (const BYTE *)nt_descr->OptionalHeader.ImageBase - addr))
+     {
+@@ -729,6 +741,46 @@ static NTSTATUS map_so_dll( const IMAGE_NT_HEADERS *nt_descr, HMODULE module )
+         fixup_rva_dwords( (DWORD *)(addr + exports->AddressOfNames), delta, exports->NumberOfNames );
+         fixup_rva_dwords( (DWORD *)(addr + exports->AddressOfFunctions), delta, exports->NumberOfFunctions );
+     }
++
++    /* fill the fakedll function table */
++
++    dir = &nt->OptionalHeader.DataDirectory[15];
++    if (dir->Size)
++    {
++        fake_table = (struct __wine_spec_func_table *)(addr + dir->VirtualAddress);
++        dll_name = (char *)&fake_table->func_ptrs + fake_table->name_offset;
++
++        name = build_path( dll_dir, dll_name );
++        handle = dlopen(name, RTLD_NOW);
++        free(name);
++
++        for (i = 0; !handle && build_dir && i < ARRAY_SIZE(subdirs); ++i)
++        {
++            if ((name = remove_tail( dll_name, ".dll.so" )))
++                sprintf(path, "%s/%s/%s/%s.dll.so", build_dir, subdirs[i], name, name);
++            else if ((name = remove_tail( dll_name, ".exe.so" )))
++                sprintf(path, "%s/%s/%s/%s.exe.so", build_dir, subdirs[i], name, name);
++            else if ((name = remove_tail( dll_name, ".so" )))
++                sprintf(path, "%s/%s/%s/%s.so", build_dir, subdirs[i], name, name);
++            else
++                continue;
++
++            handle = dlopen(path, RTLD_NOW);
++            free(name);
++        }
++
++        for (i = 0; !handle && dll_paths[i]; ++i)
++        {
++            name = build_path( dll_paths[i], dll_name );
++            handle = dlopen(name, RTLD_NOW);
++            free(name);
++        }
++
++        unix_table = dlsym(handle, "__wine_spec_unix_funcs");
++        assert(unix_table->name_offset == fake_table->name_offset);
++        memcpy(&fake_table->func_ptrs, &unix_table->func_ptrs, fake_table->name_offset);
++    }
++
+     return STATUS_SUCCESS;
+ }
+ 
+@@ -1495,6 +1547,7 @@ static struct unix_funcs unix_funcs =
+     nt_to_unix_file_name,
+     unix_to_nt_file_name,
+     set_show_dot_files,
++    map_so_dll,
+     load_so_dll,
+     load_builtin_dll,
+     unload_builtin_dll,
+diff --git a/dlls/ntdll/unixlib.h b/dlls/ntdll/unixlib.h
+index 16f91d1dcd6..be909d8299b 100644
+--- a/dlls/ntdll/unixlib.h
++++ b/dlls/ntdll/unixlib.h
+@@ -28,7 +28,7 @@ struct ldt_copy;
+ struct msghdr;
+ 
+ /* increment this when you change the function table */
+-#define NTDLL_UNIXLIB_VERSION 61
++#define NTDLL_UNIXLIB_VERSION 62
+ 
+ struct unix_funcs
+ {
+@@ -325,6 +325,7 @@ struct unix_funcs
+     void          (CDECL *set_show_dot_files)( BOOL enable );
+ 
+     /* loader functions */
++    NTSTATUS      (CDECL *map_so_dll)( const IMAGE_NT_HEADERS *nt_descr, HMODULE module );
+     NTSTATUS      (CDECL *load_so_dll)( UNICODE_STRING *nt_name, void **module );
+     NTSTATUS      (CDECL *load_builtin_dll)( const WCHAR *name, void **module,
+                                              pe_image_info_t *image_info );
+diff --git a/include/winternl.h b/include/winternl.h
+index ef848272f7f..d7233750779 100644
+--- a/include/winternl.h
++++ b/include/winternl.h
+@@ -398,7 +398,7 @@ typedef struct _TEB
+     PVOID                        Instrumentation[16];               /* f2c/16b8 */
+     PVOID                        WinSockData;                       /* f6c/1738 */
+     ULONG                        GdiBatchCount;                     /* f70/1740 */
+-    ULONG                        Spare2;                            /* f74/1744 */
++    ULONG                        Spare2;                            /* f74/1744  used for fakedll thunks */
+     ULONG                        GuaranteedStackBytes;              /* f78/1748 */
+     PVOID                        ReservedForPerf;                   /* f7c/1750 */
+     PVOID                        ReservedForOle;                    /* f80/1758 */
+
+From 1cd83f933ae85796100a8d3cc028957ff091778e Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?R=C3=A9mi=20Bernon?= <rbernon@codeweavers.com>
+Date: Thu, 18 Jun 2020 10:07:10 +0200
+Subject: [PATCH 32/32] winebuild: Generate fakedll function tables.
+
+---
+ tools/winebuild/spec32.c | 171 ++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 168 insertions(+), 3 deletions(-)
+
+diff --git a/tools/winebuild/spec32.c b/tools/winebuild/spec32.c
+index 5dd60bcc6f7..210cb4ded88 100644
+--- a/tools/winebuild/spec32.c
++++ b/tools/winebuild/spec32.c
+@@ -610,6 +610,172 @@ static void output_syscall_thunks_x64( DLLSPEC *spec )
+     output_function_size( "__wine_syscall_dispatcher" );
+ }
+ 
++void output_fakedll_dispatcher( DLLSPEC *spec )
++{
++    char *so_name, name[256];
++    int i;
++
++    if (target_platform == PLATFORM_WINDOWS) return;
++
++    output( "\n/* fakedll dispatcher thunks */\n\n" );
++    output( "\t.text\n" );
++    for (i = 0; i < spec->nb_entry_points; i++)
++    {
++        ORDDEF *odp = &spec->entry_points[i];
++        if (odp->type != TYPE_STDCALL && odp->type != TYPE_VARARGS && odp->type != TYPE_CDECL)
++            continue;
++        if (odp->flags & (FLAG_FORWARD|FLAG_IMPORT|FLAG_EXT_LINK))
++            continue;
++
++        sprintf(name, "__wrap_%s", get_link_name(odp));
++        output( "\t.ifndef %s\n", asm_name(name) );
++        output( "\t.align %d\n", get_alignment(0x100) );
++        output( "\t%s\n", func_declaration(name) );
++        output( "%s\n", asm_globl(name) );
++        output_cfi( ".cfi_startproc" );
++        switch(target_cpu)
++        {
++        case CPU_x86:
++            output( "\t.byte 0x8b,0xff,0x55,0x8b,0xec,0x5d\n" );  /* hotpatch prolog */
++            output( "\tpushl %%eax\n" );
++            if (UsePIC)
++            {
++                output( "\tcall %s\n", asm_name("__wine_spec_get_pc_thunk_eax") );
++                output( "1:\tleal .L__wine_spec_fake_ptrs+%d-1b(%%eax),%%eax\n", i * get_ptr_size() );
++                needs_get_pc_thunk = 1;
++            }
++            else output( "\tleal .L__wine_spec_fake_ptrs+%d,%%eax\n", i * get_ptr_size() );
++            output( "\tcmpl $0,0(%%eax)\n" );
++            output( "\tje %s\n", asm_name("__wine_fakedll_init_asm") );
++            output( "\tmovl 0(%%eax),%%eax\n" );
++            output( "\txchgl 0(%%esp),%%eax\n" );
++            output( "\tretl\n" );
++            break;
++        case CPU_x86_64:
++            output( "\t.byte 0x48\n" );  /* hotpatch prolog */
++            output( "\tpushq %%rax\n" );
++            output( "\tleaq .L__wine_spec_fake_ptrs+%d(%%rip),%%rax\n", i * get_ptr_size() );
++            output( "\tcmpq $0,0(%%rax)\n" );
++            output( "\tje %s\n", asm_name("__wine_fakedll_init_asm") );
++            output( "\tmovq 0(%%rax),%%rax\n" );
++            output( "\txchgq 0(%%rsp),%%rax\n" );
++            output( "\tretq\n" );
++            break;
++        default:
++            assert(0);
++            break;
++        }
++        output_cfi( ".cfi_endproc" );
++        output( "\t.align %d\n", get_alignment(0x100) );
++        output_function_size( name );
++        output( "\t.endif\n" );
++    }
++
++    output( "\t.text\n" );
++    output( "\t.align %d\n", get_alignment(8) );
++    output( "\t%s\n", func_declaration("__wine_fakedll_init_asm") );
++    output( "%s:\n", asm_name("__wine_fakedll_init_asm") );
++    output_cfi( ".cfi_startproc" );
++    switch(target_cpu)
++    {
++    case CPU_x86:
++        output( "\tpushl %%eax\n" );
++        output( "\tpushl %%ecx\n" );
++        output( "\tpushl %%edx\n" );
++        output( "\tpushl $%s\n", asm_name("__wine_spec_nt_header") );
++        output( "\tcall *%%fs:0xf74\n" );
++        output( "\tpopl %%edx\n" );
++        output( "\tpopl %%ecx\n" );
++        output( "\tpopl %%eax\n" );
++        output( "\tmovl 0(%%eax),%%eax\n" );
++        output( "\txchgl 0(%%esp),%%eax\n" );
++        output( "\tretl\n" );
++        break;
++    case CPU_x86_64:
++        output( "\tsubq $0x100,%%rsp\n" );
++        output_cfi( ".cfi_adjust_cfa_offset 0x100" );
++        output( "\tmovq %%rax,0x90(%%rsp)\n" );
++        output( "\tmovq %%rdx,0x88(%%rsp)\n" );
++        output( "\tmovq %%rcx,0x80(%%rsp)\n" );
++        output( "\tmovq %%r8,0x78(%%rsp)\n" );
++        output( "\tmovq %%r9,0x70(%%rsp)\n" );
++        output( "\tmovq %%r10,0x68(%%rsp)\n" );
++        output( "\tmovq %%r11,0x60(%%rsp)\n" );
++        output( "\tmovups %%xmm0,0x50(%%rsp)\n" );
++        output( "\tmovups %%xmm1,0x40(%%rsp)\n" );
++        output( "\tmovups %%xmm2,0x30(%%rsp)\n" );
++        output( "\tmovups %%xmm3,0x20(%%rsp)\n" );
++        output( "\tleaq %s(%%rip),%%rcx\n", asm_name("__wine_spec_nt_header") );
++        output( "\tcall *%%gs:0x1744\n" );
++        output( "\tmovups 0x20(%%rsp),%%xmm3\n" );
++        output( "\tmovups 0x30(%%rsp),%%xmm2\n" );
++        output( "\tmovups 0x40(%%rsp),%%xmm1\n" );
++        output( "\tmovups 0x50(%%rsp),%%xmm0\n" );
++        output( "\tmovq 0x60(%%rsp),%%r11\n" );
++        output( "\tmovq 0x68(%%rsp),%%r10\n" );
++        output( "\tmovq 0x70(%%rsp),%%r9\n" );
++        output( "\tmovq 0x78(%%rsp),%%r8\n" );
++        output( "\tmovq 0x80(%%rsp),%%rcx\n" );
++        output( "\tmovq 0x88(%%rsp),%%rdx\n" );
++        output( "\tmovq 0x90(%%rsp),%%rax\n" );
++        output( "\taddq $0x100,%%rsp\n" );
++        output_cfi( ".cfi_adjust_cfa_offset -0x100" );
++        output( "\tmovq 0(%%rax),%%rax\n" );
++        output( "\txchgq 0(%%rsp),%%rax\n" );
++        output( "\tretq\n" );
++        break;
++    default:
++        assert(0);
++        break;
++    }
++    output_cfi( ".cfi_endproc" );
++    output_function_size( "__wine_fakedll_init_asm" );
++    output( "\n" );
++
++    so_name = strdup(spec->file_name);
++    for (i = 0; so_name[i]; ++i) so_name[i] = tolower(so_name[i]);
++
++    output( "\n/* fakedll dispatcher tables */\n\n" );
++    output( "\t%s\n", get_asm_data_section() );
++    output( "\t.align %d, 0\n", get_alignment(4) );
++    output( "%s\n", asm_globl("__wine_spec_fake_funcs") );
++    output( ".L__wine_spec_fake_funcs:\n" );
++    output( "\t%s .L__wine_spec_fake_name-.L__wine_spec_fake_ptrs\n", get_asm_ptr_keyword() );
++    output( ".L__wine_spec_fake_ptrs:\n" );
++    for (i = 0; i < spec->nb_entry_points; i++)
++        output( "\t%s 0\n", get_asm_ptr_keyword() );
++    output( ".L__wine_spec_fake_name:\n" );
++    output( "\t.ascii \"%s.so\"\n", so_name );
++    output( "\t.long 0\n" );
++    output( ".L__wine_spec_fake_funcs_end:\n" );
++
++    output( "\t%s\n", get_asm_data_section() );
++    output( "\t.globl %s\n", asm_name("__wine_spec_unix_funcs") );
++    output( "%s:\n", asm_name("__wine_spec_unix_funcs") );
++    output( ".L__wine_spec_unix_funcs:\n" );
++    output( "\t%s .L__wine_spec_unix_name-.L__wine_spec_unix_ptrs\n", get_asm_ptr_keyword() );
++    output( ".L__wine_spec_unix_ptrs:\n" );
++    for (i = 0; i < spec->nb_entry_points; i++)
++    {
++        ORDDEF *odp = &spec->entry_points[i];
++
++        if (odp->type != TYPE_STDCALL && odp->type != TYPE_VARARGS && odp->type != TYPE_CDECL)
++            output( "\t%s 0\n", get_asm_ptr_keyword() );
++        else if (odp->flags & (FLAG_FORWARD|FLAG_IMPORT|FLAG_EXT_LINK))
++            output( "\t%s 0\n", get_asm_ptr_keyword() );
++        else
++        {
++            sprintf(name, "__real_%s", get_link_name( odp ));
++            output( "\t%s %s\n", get_asm_ptr_keyword(), asm_name(name) );
++        }
++    }
++    output( ".L__wine_spec_unix_name:\n" );
++    output( "\t.ascii \"%s.so\"\n", so_name );
++    output( "\t.long 0\n" );
++
++    free(so_name);
++}
++
+ /*******************************************************************
+  *         output_exports
+  *
+@@ -1027,6 +1193,7 @@ void output_module( DLLSPEC *spec )
+         data_dirs[1] = ".L__wine_spec_imports";   /* DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT] */
+     if (spec->nb_resources)
+         data_dirs[2] = ".L__wine_spec_resources"; /* DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE] */
++    data_dirs[15] = ".L__wine_spec_fake_funcs";   /* DataDirectory[IMAGE_DIRECTORY_ENTRY_RESERVED] */
+ 
+     output_data_directories( data_dirs );
+ 
+@@ -1166,6 +1333,7 @@ void output_spec32_file( DLLSPEC *spec )
+         output_syscall_thunks_x86( spec );
+     else if (target_cpu == CPU_x86_64)
+         output_syscall_thunks_x64( spec );
++    output_fakedll_dispatcher( spec );
+     output_stubs( spec );
+     output_relay_data( spec );
+     if (needs_get_pc_thunk) output_get_pc_thunk();
+@@ -1495,9 +1663,6 @@ void output_wrap_file( DLLSPEC *spec )
+ 
+         name = asm_name( get_link_name( odp ) );
+         output( "-Wl,--wrap=%s\n", name );
+-        if (odp->flags & FLAG_SYSCALL) continue;
+-
+-        output( "-Wl,--defsym=__wrap_%s=__real_%s\n", name, name );
+     }
+     if (spec32) free_dll_spec( spec32 );
+ }
