@@ -260,7 +260,7 @@ index 23a051a7ef0f..80747f1377d5 100644
  
  		page = find_get_page(mapping, index);
  		if (!page) {
--			if (iocb->ki_flags & IOCB_NOWAIT)
+-			if (iocb->ki_flags & (IOCB_NOWAIT | IOCB_NOIO))
 -				goto would_block;
  			page_cache_sync_readahead(mapping,
  					ra, filp,
@@ -631,9 +631,9 @@ index d3ebb49189df..ba1fff0e7bca 100644
  #define IOCB_NOWAIT		(1 << 7)
 +/* iocb->ki_waitq is valid */
 +#define IOCB_WAITQ		(1 << 8)
+ #define IOCB_NOIO		(1 << 9)
  
  struct kiocb {
- 	struct file		*ki_filp;
 @@ -327,7 +329,10 @@ struct kiocb {
  	int			ki_flags;
  	u16			ki_hint;

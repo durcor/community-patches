@@ -1,104 +1,105 @@
-From patchwork Mon Jun  1 19:48:22 2020
+From patchwork Tue Jun 16 20:45:27 2020
 Content-Type: text/plain; charset="utf-8"
 MIME-Version: 1.0
 Content-Transfer-Encoding: 8bit
 X-Patchwork-Submitter: Nitin Gupta <nigupta@nvidia.com>
-X-Patchwork-Id: 11582605
-Return-Path: <SRS0=za/P=7O=kvack.org=owner-linux-mm@kernel.org>
+X-Patchwork-Id: 11608611
+Return-Path: <SRS0=hIPo=75=kvack.org=owner-linux-mm@kernel.org>
 Received: from mail.kernel.org (pdx-korg-mail-1.web.codeaurora.org
  [172.30.200.123])
-	by pdx-korg-patchwork-2.web.codeaurora.org (Postfix) with ESMTP id D65F192A
+	by pdx-korg-patchwork-2.web.codeaurora.org (Postfix) with ESMTP id 1B7E0618
 	for <patchwork-linux-mm@patchwork.kernel.org>;
- Mon,  1 Jun 2020 19:48:41 +0000 (UTC)
+ Tue, 16 Jun 2020 20:45:36 +0000 (UTC)
 Received: from kanga.kvack.org (kanga.kvack.org [205.233.56.17])
-	by mail.kernel.org (Postfix) with ESMTP id 84C372077D
+	by mail.kernel.org (Postfix) with ESMTP id B3F72208B3
 	for <patchwork-linux-mm@patchwork.kernel.org>;
- Mon,  1 Jun 2020 19:48:41 +0000 (UTC)
+ Tue, 16 Jun 2020 20:45:35 +0000 (UTC)
 Authentication-Results: mail.kernel.org;
 	dkim=pass (2048-bit key) header.d=nvidia.com header.i=@nvidia.com
- header.b="CN2thDis"
-DMARC-Filter: OpenDMARC Filter v1.3.2 mail.kernel.org 84C372077D
+ header.b="jd1F/DRB"
+DMARC-Filter: OpenDMARC Filter v1.3.2 mail.kernel.org B3F72208B3
 Authentication-Results: mail.kernel.org;
  dmarc=fail (p=none dis=none) header.from=nvidia.com
 Authentication-Results: mail.kernel.org;
  spf=pass smtp.mailfrom=owner-linux-mm@kvack.org
 Received: by kanga.kvack.org (Postfix)
-	id 56A1580007; Mon,  1 Jun 2020 15:48:40 -0400 (EDT)
+	id 9B32E6B000C; Tue, 16 Jun 2020 16:45:34 -0400 (EDT)
 Delivered-To: linux-mm-outgoing@kvack.org
 Received: by kanga.kvack.org (Postfix, from userid 40)
-	id 4F6648E0006; Mon,  1 Jun 2020 15:48:40 -0400 (EDT)
+	id 93DAD6B000D; Tue, 16 Jun 2020 16:45:34 -0400 (EDT)
 X-Original-To: int-list-linux-mm@kvack.org
 X-Delivered-To: int-list-linux-mm@kvack.org
 Received: by kanga.kvack.org (Postfix, from userid 63042)
-	id 3939080007; Mon,  1 Jun 2020 15:48:40 -0400 (EDT)
+	id 7B75C6B000E; Tue, 16 Jun 2020 16:45:34 -0400 (EDT)
 X-Original-To: linux-mm@kvack.org
 X-Delivered-To: linux-mm@kvack.org
-Received: from forelay.hostedemail.com (smtprelay0066.hostedemail.com
- [216.40.44.66])
-	by kanga.kvack.org (Postfix) with ESMTP id 1796D8E0006
-	for <linux-mm@kvack.org>; Mon,  1 Jun 2020 15:48:40 -0400 (EDT)
-Received: from smtpin24.hostedemail.com (10.5.19.251.rfc1918.com
+Received: from forelay.hostedemail.com (smtprelay0008.hostedemail.com
+ [216.40.44.8])
+	by kanga.kvack.org (Postfix) with ESMTP id 593C46B000C
+	for <linux-mm@kvack.org>; Tue, 16 Jun 2020 16:45:34 -0400 (EDT)
+Received: from smtpin30.hostedemail.com (10.5.19.251.rfc1918.com
  [10.5.19.251])
-	by forelay03.hostedemail.com (Postfix) with ESMTP id CC84E8248047
-	for <linux-mm@kvack.org>; Mon,  1 Jun 2020 19:48:39 +0000 (UTC)
-X-FDA: 76881680358.24.crown20_85bc93acac45e
+	by forelay05.hostedemail.com (Postfix) with ESMTP id E4753181AC9B6
+	for <linux-mm@kvack.org>; Tue, 16 Jun 2020 20:45:33 +0000 (UTC)
+X-FDA: 76936255746.30.soda72_3b15b4126e02
 Received: from filter.hostedemail.com (10.5.16.251.rfc1918.com [10.5.16.251])
-	by smtpin24.hostedemail.com (Postfix) with ESMTP id A6A91D711E
-	for <linux-mm@kvack.org>; Mon,  1 Jun 2020 19:48:39 +0000 (UTC)
+	by smtpin30.hostedemail.com (Postfix) with ESMTP id B45D018100F91
+	for <linux-mm@kvack.org>; Tue, 16 Jun 2020 20:45:33 +0000 (UTC)
 X-Spam-Summary: 
- 1,0,0,,d41d8cd98f00b204,nigupta@nvidia.com,,RULES_HIT:30034:30045:30051:30054:30064:30069:30070:30075:30090,0,RBL:216.228.121.143:@nvidia.com:.lbl8.mailshell.net-62.18.0.100
+ 1,0,0,,d41d8cd98f00b204,nigupta@nvidia.com,,RULES_HIT:30034:30045:30051:30054:30064:30069:30070:30075:30090,0,RBL:216.228.121.65:@nvidia.com:.lbl8.mailshell.net-62.18.0.100
  64.10.201.10,CacheIP:none,Bayesian:0.5,0.5,0.5,Netcheck:none,DomainCache:0,MSF:not
- bulk,SPF:ft,MSBL:0,DNSBL:neutral,Custom_rules:0:0:0,LFtime:32,LUA_SUMMARY:none
-X-HE-Tag: crown20_85bc93acac45e
-X-Filterd-Recvd-Size: 23981
-Received: from hqnvemgate24.nvidia.com (hqnvemgate24.nvidia.com
- [216.228.121.143])
-	by imf08.hostedemail.com (Postfix) with ESMTP
-	for <linux-mm@kvack.org>; Mon,  1 Jun 2020 19:48:38 +0000 (UTC)
+ bulk,SPF:ft,MSBL:0,DNSBL:neutral,Custom_rules:0:0:0,LFtime:23,LUA_SUMMARY:none
+X-HE-Tag: soda72_3b15b4126e02
+X-Filterd-Recvd-Size: 24447
+Received: from hqnvemgate26.nvidia.com (hqnvemgate26.nvidia.com
+ [216.228.121.65])
+	by imf22.hostedemail.com (Postfix) with ESMTP
+	for <linux-mm@kvack.org>; Tue, 16 Jun 2020 20:45:32 +0000 (UTC)
 Received: from hqpgpgate101.nvidia.com (Not Verified[216.228.121.13]) by
- hqnvemgate24.nvidia.com (using TLS: TLSv1.2, DES-CBC3-SHA)
-	id <B5ed55b360000>; Mon, 01 Jun 2020 12:47:02 -0700
+ hqnvemgate26.nvidia.com (using TLS: TLSv1.2, DES-CBC3-SHA)
+	id <B5ee92f5d0000>; Tue, 16 Jun 2020 13:45:17 -0700
 Received: from hqmail.nvidia.com ([172.20.161.6])
   by hqpgpgate101.nvidia.com (PGP Universal service);
-  Mon, 01 Jun 2020 12:48:37 -0700
+  Tue, 16 Jun 2020 13:45:30 -0700
 X-PGP-Universal: processed;
-	by hqpgpgate101.nvidia.com on Mon, 01 Jun 2020 12:48:37 -0700
-Received: from HQMAIL101.nvidia.com (172.20.187.10) by HQMAIL107.nvidia.com
- (172.20.187.13) with Microsoft SMTP Server (TLS) id 15.0.1473.3; Mon, 1 Jun
- 2020 19:48:37 +0000
-Received: from rnnvemgw01.nvidia.com (10.128.109.123) by HQMAIL101.nvidia.com
- (172.20.187.10) with Microsoft SMTP Server (TLS) id 15.0.1473.3 via Frontend
- Transport; Mon, 1 Jun 2020 19:48:36 +0000
+	by hqpgpgate101.nvidia.com on Tue, 16 Jun 2020 13:45:30 -0700
+Received: from HQMAIL107.nvidia.com (172.20.187.13) by HQMAIL111.nvidia.com
+ (172.20.187.18) with Microsoft SMTP Server (TLS) id 15.0.1473.3; Tue, 16 Jun
+ 2020 20:45:30 +0000
+Received: from hqnvemgw03.nvidia.com (10.124.88.68) by HQMAIL107.nvidia.com
+ (172.20.187.13) with Microsoft SMTP Server (TLS) id 15.0.1473.3 via Frontend
+ Transport; Tue, 16 Jun 2020 20:45:30 +0000
 Received: from ng-desktop.nvidia.com (Not Verified[10.110.48.88]) by
- rnnvemgw01.nvidia.com with Trustwave SEG (v7,5,8,10121)
-	id <B5ed55b930003>; Mon, 01 Jun 2020 12:48:36 -0700
+ hqnvemgw03.nvidia.com with Trustwave SEG (v7,5,8,10121)
+	id <B5ee92f6a0000>; Tue, 16 Jun 2020 13:45:30 -0700
 From: Nitin Gupta <nigupta@nvidia.com>
-To: Mel Gorman <mgorman@techsingularity.net>, Michal Hocko <mhocko@suse.com>,
-	Vlastimil Babka <vbabka@suse.cz>
-CC: Nitin Gupta <nigupta@nvidia.com>, Matthew Wilcox <willy@infradead.org>,
-	Andrew Morton <akpm@linux-foundation.org>, Mike Kravetz
-	<mike.kravetz@oracle.com>, Joonsoo Kim <iamjoonsoo.kim@lge.com>, David
- Rientjes <rientjes@google.com>, Nitin Gupta <ngupta@nitingupta.dev>,
-	linux-kernel <linux-kernel@vger.kernel.org>, linux-mm <linux-mm@kvack.org>,
-	Linux API <linux-api@vger.kernel.org>
-Subject: [PATCH v6] mm: Proactive compaction
-Date: Mon, 1 Jun 2020 12:48:22 -0700
-Message-ID: <20200601194822.30252-1-nigupta@nvidia.com>
-X-Mailer: git-send-email 2.26.2
+To: Andrew Morton <akpm@linux-foundation.org>
+CC: Nitin Gupta <nigupta@nvidia.com>, Vlastimil Babka <vbabka@suse.cz>, Khalid
+ Aziz <khalid.aziz@oracle.com>, Oleksandr Natalenko <oleksandr@redhat.com>,
+	Michal Hocko <mhocko@suse.com>, Mel Gorman <mgorman@techsingularity.net>,
+	Matthew Wilcox <willy@infradead.org>, Mike Kravetz <mike.kravetz@oracle.com>,
+	Joonsoo Kim <iamjoonsoo.kim@lge.com>, David Rientjes <rientjes@google.com>,
+	Nitin Gupta <ngupta@nitingupta.dev>, linux-kernel
+	<linux-kernel@vger.kernel.org>, linux-mm <linux-mm@kvack.org>, Linux API
+	<linux-api@vger.kernel.org>
+Subject: [PATCH v8] mm: Proactive compaction
+Date: Tue, 16 Jun 2020 13:45:27 -0700
+Message-ID: <20200616204527.19185-1-nigupta@nvidia.com>
+X-Mailer: git-send-email 2.27.0
 MIME-Version: 1.0
 DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=nvidia.com; s=n1;
-	t=1591040822; bh=PS3592/V6A2xPjuNJQANjrVCzn9TTWqImpa3Ko4zVbU=;
+	t=1592340317; bh=wf024JximB2WhWlmE4w7qxmshIG/IUSRgr8Dplve4u0=;
 	h=X-PGP-Universal:From:To:CC:Subject:Date:Message-ID:X-Mailer:
 	 MIME-Version:Content-Type:Content-Transfer-Encoding;
-	b=CN2thDisF8N6GMpwIsEe40CCnZaAgfEv4LTQeFu/qm4lFx8Azk1Jsub+JDXHW/Qi2
-	 QiJ2KuVLmSP2fhCXEVbL0fc5E7cWE9fOjjjPK41rhZUqj+NLZGe5pbOwSxfM3NwNLH
-	 6eAVu/qZMLDjYpz4B1jemZvJuQ53zXZGxCYu9QGnOTM5/q8EeYVXaFj/WStoIvKRHI
-	 p/dnXE4TCWikmnKVzSQZor1b6jWtFGc3jM8bs/ixUoX0E5LjwZKbdbqK+7Fl8rYngP
-	 CJwhaSYOtLL5cQxP5QRvZGqRJyt4EEfXk8DBt88pX/ZmIL73KtPu/6cwZqq10xC/aQ
-	 LV7BlFckNQ0gw==
-X-Rspamd-Queue-Id: A6A91D711E
+	b=jd1F/DRBTFuoysVO1WWF1mB1NzqAtBmuThMFordPobqxPV6mxEab87FblTru/8cqc
+	 PKEQbpwkriUEbXF7F/V48O/Z8KBQfr5mSuN00pSUAV+uNx1x2tTLMzM5H43RzKGFkf
+	 Chv/V/sX8UHuGmQNWUn+DJG98rSHVG5ggjQ1KCAtH8HBna4uvVJ6d/o1h2PQs/uGfX
+	 h1RYUydA9fnMSx3Q4nJuD1a/GnY2u8toz2IWfkoHMexwvuEErB65pDXlGL57jsLIht
+	 pWW95n4vNnZo8u87fqNSlrL1IYUysxlwp67LRRLYH6dZlj1W+WQBLetiS9XVqHBz2J
+	 uBEjno2tWw/mg==
+X-Rspamd-Queue-Id: B45D018100F91
 X-Spamd-Result: default: False [0.00 / 100.00]
-X-Rspamd-Server: rspam05
+X-Rspamd-Server: rspam02
 X-Bogosity: Ham, tests=bogofilter, spamicity=0.000000, version=1.2.4
 Sender: owner-linux-mm@kvack.org
 Precedence: bulk
@@ -268,19 +269,31 @@ should essentially back off. To test this aspect:
 
 Signed-off-by: Nitin Gupta <nigupta@nvidia.com>
 Reviewed-by: Vlastimil Babka <vbabka@suse.cz>
-To: Mel Gorman <mgorman@techsingularity.net>
-To: Michal Hocko <mhocko@suse.com>
-To: Vlastimil Babka <vbabka@suse.cz>
+Reviewed-by: Khalid Aziz <khalid.aziz@oracle.com>
+Reviewed-by: Oleksandr Natalenko <oleksandr@redhat.com>
+Tested-by: Oleksandr Natalenko <oleksandr@redhat.com>
+To: Andrew Morton <akpm@linux-foundation.org>
+CC: Vlastimil Babka <vbabka@suse.cz>
+CC: Khalid Aziz <khalid.aziz@oracle.com>
+CC: Michal Hocko <mhocko@suse.com>
+CC: Mel Gorman <mgorman@techsingularity.net>
 CC: Matthew Wilcox <willy@infradead.org>
-CC: Andrew Morton <akpm@linux-foundation.org>
 CC: Mike Kravetz <mike.kravetz@oracle.com>
 CC: Joonsoo Kim <iamjoonsoo.kim@lge.com>
 CC: David Rientjes <rientjes@google.com>
 CC: Nitin Gupta <ngupta@nitingupta.dev>
+CC: Oleksandr Natalenko <oleksandr@redhat.com>
 CC: linux-kernel <linux-kernel@vger.kernel.org>
 CC: linux-mm <linux-mm@kvack.org>
 CC: Linux API <linux-api@vger.kernel.org>
+Tested-by: Nathan Chancellor <natechancellor@gmail.com> # build
 ---
+Changelog v8 vs v7:
+ - Rebase to 5.8-rc1
+
+Changelog v7 vs v6:
+ - Fix compile error while THP is disabled (Oleksandr)
+
 Changelog v6 vs v5:
  - Fallback to HUGETLB_PAGE_ORDER if HPAGE_PMD_ORDER is not defined, and
    some cleanups (Vlastimil)
@@ -329,7 +342,7 @@ Changelog v2 vs v1:
  6 files changed, 223 insertions(+), 5 deletions(-)
 
 diff --git a/Documentation/admin-guide/sysctl/vm.rst b/Documentation/admin-guide/sysctl/vm.rst
-index 0329a4d3fa9e..360914b4f346 100644
+index d46d5b7013c6..4b7c496199ca 100644
 --- a/Documentation/admin-guide/sysctl/vm.rst
 +++ b/Documentation/admin-guide/sysctl/vm.rst
 @@ -119,6 +119,21 @@ all zones are compacted such that free memory is available in contiguous
@@ -355,7 +368,7 @@ index 0329a4d3fa9e..360914b4f346 100644
  compact_unevictable_allowed
  ===========================
 diff --git a/include/linux/compaction.h b/include/linux/compaction.h
-index 4b898cdbdf05..ccd28978b296 100644
+index 6fa0eea3f530..7a242d46454e 100644
 --- a/include/linux/compaction.h
 +++ b/include/linux/compaction.h
 @@ -85,11 +85,13 @@ static inline unsigned long compact_gap(unsigned int order)
@@ -364,7 +377,7 @@ index 4b898cdbdf05..ccd28978b296 100644
  extern int sysctl_compact_memory;
 +extern int sysctl_compaction_proactiveness;
  extern int sysctl_compaction_handler(struct ctl_table *table, int write,
- 			void __user *buffer, size_t *length, loff_t *ppos);
+ 			void *buffer, size_t *length, loff_t *ppos);
  extern int sysctl_extfrag_threshold;
  extern int sysctl_compact_unevictable_allowed;
  
@@ -373,10 +386,10 @@ index 4b898cdbdf05..ccd28978b296 100644
  extern enum compact_result try_to_compact_pages(gfp_t gfp_mask,
  		unsigned int order, unsigned int alloc_flags,
 diff --git a/kernel/sysctl.c b/kernel/sysctl.c
-index 8a176d8727a3..51c90906efbc 100644
+index db1ce7af2563..58b0a59c9769 100644
 --- a/kernel/sysctl.c
 +++ b/kernel/sysctl.c
-@@ -1458,6 +1458,15 @@ static struct ctl_table vm_table[] = {
+@@ -2830,6 +2830,15 @@ static struct ctl_table vm_table[] = {
  		.mode		= 0200,
  		.proc_handler	= sysctl_compaction_handler,
  	},
@@ -393,7 +406,7 @@ index 8a176d8727a3..51c90906efbc 100644
  		.procname	= "extfrag_threshold",
  		.data		= &sysctl_extfrag_threshold,
 diff --git a/mm/compaction.c b/mm/compaction.c
-index 46f0fcc93081..822ff72817d5 100644
+index fd988b7e5f2b..ac2030814edb 100644
 --- a/mm/compaction.c
 +++ b/mm/compaction.c
 @@ -50,6 +50,24 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
@@ -410,7 +423,7 @@ index 46f0fcc93081..822ff72817d5 100644
 + * calculates external fragmentation, which is used as
 + * the "fragmentation score" of a node/zone.
 + */
-+#if defined HPAGE_PMD_ORDER
++#if defined CONFIG_TRANSPARENT_HUGEPAGE
 +#define COMPACTION_HPAGE_ORDER	HPAGE_PMD_ORDER
 +#elif defined HUGETLB_PAGE_ORDER
 +#define COMPACTION_HPAGE_ORDER	HUGETLB_PAGE_ORDER
@@ -421,7 +434,7 @@ index 46f0fcc93081..822ff72817d5 100644
  static unsigned long release_freepages(struct list_head *freelist)
  {
  	struct page *page, *next;
-@@ -1855,6 +1873,76 @@ static inline bool is_via_compact_memory(int order)
+@@ -1857,6 +1875,76 @@ static inline bool is_via_compact_memory(int order)
  	return order == -1;
  }
  
@@ -498,7 +511,7 @@ index 46f0fcc93081..822ff72817d5 100644
  static enum compact_result __compact_finished(struct compact_control *cc)
  {
  	unsigned int order;
-@@ -1881,6 +1969,25 @@ static enum compact_result __compact_finished(struct compact_control *cc)
+@@ -1883,6 +1971,25 @@ static enum compact_result __compact_finished(struct compact_control *cc)
  			return COMPACT_PARTIAL_SKIPPED;
  	}
  
@@ -524,7 +537,7 @@ index 46f0fcc93081..822ff72817d5 100644
  	if (is_via_compact_memory(cc->order))
  		return COMPACT_CONTINUE;
  
-@@ -1939,6 +2046,7 @@ static enum compact_result __compact_finished(struct compact_control *cc)
+@@ -1941,6 +2048,7 @@ static enum compact_result __compact_finished(struct compact_control *cc)
  		}
  	}
  
@@ -532,7 +545,7 @@ index 46f0fcc93081..822ff72817d5 100644
  	if (cc->contended || fatal_signal_pending(current))
  		ret = COMPACT_CONTENDED;
  
-@@ -2412,6 +2520,41 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
+@@ -2410,6 +2518,41 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
  	return rc;
  }
  
@@ -574,7 +587,7 @@ index 46f0fcc93081..822ff72817d5 100644
  
  /* Compact all zones within a node */
  static void compact_node(int nid)
-@@ -2458,6 +2601,13 @@ static void compact_nodes(void)
+@@ -2456,6 +2599,13 @@ static void compact_nodes(void)
  /* The written value is actually unused, all memory is compacted */
  int sysctl_compact_memory;
  
@@ -588,7 +601,7 @@ index 46f0fcc93081..822ff72817d5 100644
  /*
   * This is the entry point for compacting all nodes via
   * /proc/sys/vm/compact_memory
-@@ -2637,6 +2787,7 @@ static int kcompactd(void *p)
+@@ -2635,6 +2785,7 @@ static int kcompactd(void *p)
  {
  	pg_data_t *pgdat = (pg_data_t*)p;
  	struct task_struct *tsk = current;
@@ -596,7 +609,7 @@ index 46f0fcc93081..822ff72817d5 100644
  
  	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
  
-@@ -2652,12 +2803,34 @@ static int kcompactd(void *p)
+@@ -2650,12 +2801,34 @@ static int kcompactd(void *p)
  		unsigned long pflags;
  
  		trace_mm_compaction_kcompactd_sleep(pgdat->node_id);
@@ -637,10 +650,10 @@ index 46f0fcc93081..822ff72817d5 100644
  
  	return 0;
 diff --git a/mm/internal.h b/mm/internal.h
-index b5634e78f01d..9671bccd97d5 100644
+index 9886db20d94f..42cf0b610847 100644
 --- a/mm/internal.h
 +++ b/mm/internal.h
-@@ -228,6 +228,7 @@ struct compact_control {
+@@ -239,6 +239,7 @@ struct compact_control {
  	bool no_set_skip_hint;		/* Don't mark blocks for skipping */
  	bool ignore_block_suitable;	/* Scan blocks considered unsuitable */
  	bool direct_compaction;		/* False from kcompactd or /proc/... */
@@ -649,7 +662,7 @@ index b5634e78f01d..9671bccd97d5 100644
  	bool contended;			/* Signal lock or sched contention */
  	bool rescan;			/* Rescanning the same pageblock */
 diff --git a/mm/vmstat.c b/mm/vmstat.c
-index 96d21a792b57..cc88f7533b8d 100644
+index 3fb23a21f6dd..3e7ba8bce2ba 100644
 --- a/mm/vmstat.c
 +++ b/mm/vmstat.c
 @@ -1074,6 +1074,24 @@ static int __fragmentation_index(unsigned int order, struct contig_page_info *in
