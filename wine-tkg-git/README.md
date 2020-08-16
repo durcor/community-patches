@@ -22,13 +22,13 @@
 - NFSWLauncherfix.mypatch : Fix for Need for Speed World's SBRW launcher - https://github.com/SoapboxRaceWorld/wine
 - gta4_gamepad_workaround.mypatch : Workaround for GTA IV gamepad issues thanks to @AlexeyProkhin - https://github.com/ValveSoftware/Proton/issues/350#issuecomment-606425633
 - starcitizen_voip_fix.mypatch : Fix for VOIP functionality in Star Citizen thanks to @snatella - https://github.com/snatella/wine-runner-sc - https://paste.debian.net/hidden/4907fc09/
+- 0001-powershell-add-wrapper-for-powershell-using-Powershe.patch - Patch for Waves Central from Louis Lenders (requires winetricks arial) - https://github.com/Frogging-Family/community-patches/pull/20
 
 ## Misc
 - rockstarlauncher_install_fix.mypatch : Fix for rockstar launcher installer crashing - https://github.com/ValveSoftware/wine/commit/e485252dfad51a7e463643d56fe138129597e4b6 - Doesn't apply to proton-tkg or wine builds using `_protonify="true"` (already included)
 - rockstarlauncher_downloads.mypatch : Hack to workaround failing downloads with rockstar launcher - https://bugs.winehq.org/show_bug.cgi?id=47843 - Doesn't apply to proton-tkg or wine builds using `_protonify="true"` (already included)
 - origin_downloads_e4ca5dbe_revert.mypatch : Workaround for Origin client game downloading issues - https://bugs.winehq.org/show_bug.cgi?id=48032
 - 0001-Add-some-semi-stubs-in-user32.mypatch : Fixes black/green screen when running Steep in fullscreen/windowed fullscreen mode, courtesy of Guy1524
-- guy1524_mfplat_WIP.mypatch : MFPlat support patchset from our Lord and Savior Guy1524, binaryless version - You'll likely want `_proton_mf_hacks="false"` when using it - https://github.com/Guy1524/wine/commits/mfplat_cleanup
 - winex11_limit_resources-nmode.mypatch : Hack to fix DARK SOULS III, Nier: Automata and Sekiro: Shadows Die Twice crashing when there are too many display modes available - This can lead to missing modes on other games if you're affected by the issue - https://github.com/ValveSoftware/wine/pull/83
 - kernel32-implement-Windows-NT-style-GMEM_MOVEABLE-LM-no-staging.mypatch : Allow GlobalAlloc and LocalAlloc GMEM_MOVEABLE to be used with HeapSize. Resolve crashing issues with wxWidgets drag and drop. Fix Wrye Bash (for non staging build ) - https://bugs.winehq.org/show_bug.cgi?id=38924
 - kernel32-implement-Windows-NT-style-GMEM_MOVEABLE-LM-staging.mypatch : Allow GlobalAlloc and LocalAlloc GMEM_MOVEABLE to be used with HeapSize. Resolve crashing issues with wxWidgets drag and drop. Fix Wrye Bash (for staging build ) - https://bugs.winehq.org/show_bug.cgi?id=38924
