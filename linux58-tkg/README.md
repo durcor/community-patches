@@ -20,3 +20,4 @@
 - workingset_protection.mypatch - Improve swapping/OOM behaviour - https://patchwork.kernel.org/cover/11680389/
 >>>>>>> 7d4b78b70bc2461fe14cb3b28e13ac776d867335
 - zstd.mypatch - Add support for Zstandard-compressed kernel (do not use for modules if you didn't apply kmod and mkinitcpio patches) - https://github.com/facebook/zstd/tree/dev/contrib/linux-kernel
+- cachy-5.8.3.mypatch - Cachy CPU scheduler - **Requires selecting CFS** - https://github.com/hamadmarri/cachy-sched
