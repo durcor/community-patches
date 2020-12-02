@@ -15,6 +15,7 @@
 - hide-prefix-update-window.mypatch : As the name implies, will hide the prefix update dialog - https://github.com/ValveSoftware/wine/commit/6051b0612ca0436139f6e059cdaa704b7d9fa7ab - Doesn't apply to proton-tkg (already included)
 - unhide-prefix-update-window.mypatch : As the name implies, will unhide the prefix update dialog - https://github.com/ValveSoftware/wine/commit/6051b0612ca0436139f6e059cdaa704b7d9fa7ab - Applies to proton-tkg **only**
 - winex11-fs-no_above_state.mypatch : Don't set ABOVE state for FULLSCREEN windows, fixing alt-tabbing in various games. There's a reported issue with Xfce where panels can stay above games with this patch applied. Requires `_proton_fs_hack="true"` in your .cfg - https://github.com/ValveSoftware/wine/commit/a8675091927c01a0c28de349517c5010557f06a9
+- winex11-fs-no_above_state-nofshack.mypatch : Same as above for `_proton_fs_hack="false"` or wine 5.20 or newer.
 
 
 ## Game-specific
@@ -24,7 +25,6 @@
 - blackops2_unhandled_exception_fix.mypatch : Fix for the Unhandled Exception crash of Call of Duty - Black Ops 2 on start up - Won't work on Proton due to CEG - https://bugs.winehq.org/show_bug.cgi?id=46472
 - NFSWLauncherfix.mypatch : Fix for Need for Speed World's SBRW launcher - https://github.com/SoapboxRaceWorld/wine
 - gta4_gamepad_workaround.mypatch : Workaround for GTA IV gamepad issues thanks to @AlexeyProkhin - https://github.com/ValveSoftware/Proton/issues/350#issuecomment-606425633
-- starcitizen_voip_fix.mypatch : Fix for VOIP functionality in Star Citizen thanks to @snatella - https://github.com/snatella/wine-runner-sc - https://paste.debian.net/hidden/4907fc09/
 - 0001-powershell-add-wrapper-for-powershell-using-Powershe.patch - Patch for Waves Central from Louis Lenders (requires winetricks arial) - https://github.com/Frogging-Family/community-patches/pull/20
 
 
