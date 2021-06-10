@@ -16,6 +16,8 @@
 - unhide-prefix-update-window.mypatch : As the name implies, will unhide the prefix update dialog - https://github.com/ValveSoftware/wine/commit/6051b0612ca0436139f6e059cdaa704b7d9fa7ab - Applies to proton-tkg **only**
 - winex11-fs-no_above_state.mypatch : Don't set ABOVE state for FULLSCREEN windows, fixing alt-tabbing in various games. There's a reported issue with Xfce where panels can stay above games with this patch applied. Requires `_proton_fs_hack="true"` in your .cfg - https://github.com/ValveSoftware/wine/commit/a8675091927c01a0c28de349517c5010557f06a9
 - winex11-fs-no_above_state-nofshack.mypatch : Same as above for `_proton_fs_hack="false"` or wine 5.20 or newer - Thanks to ErdeFB - https://github.com/Frogging-Family/community-patches/issues/31
+- 0002-proton_LFH.mypatch : Rémi Bernon's Low Fragmentation Heap patchset - Improves performance in various games on some platforms
+- 0002-proton_QPC.mypatch : Rémi Bernon's Qpc timer bypass patchset - Improves timing and performance in various games
 
 
 ## Game-specific
@@ -26,13 +28,14 @@
 - NFSWLauncherfix.mypatch : Fix for Need for Speed World's SBRW launcher - https://github.com/SoapboxRaceWorld/wine
 - gta4_gamepad_workaround.mypatch : Workaround for GTA IV gamepad issues thanks to @AlexeyProkhin - https://github.com/ValveSoftware/Proton/issues/350#issuecomment-606425633
 - 0001-powershell-add-wrapper-for-powershell-using-Powershe.mypatch - Patch for Waves Central from Louis Lenders (requires winetricks arial) - https://github.com/Frogging-Family/community-patches/pull/20
-- star-citizen-StorageDeviceSeekPenaltyProperty.mypatch - Patch to add StorageDeviceSeekPenaltyProperty support, needed by StarCitizen 3.13 - https://bugs.winehq.org/show_bug.cgi?id=50992
+- star-citizen-StorageDeviceSeekPenaltyProperty.mypatch - Patch to add StorageDeviceSeekPenaltyProperty support, needed by StarCitizen 3.13+ - Enabling this patch on staging will also disable staging patchsets known to currently break Star Citizen (ntdll-ForceBottomUpAlloc, ntdll-WRITECOPY and ntdll-Builtin_Prot) - https://bugs.winehq.org/show_bug.cgi?id=50992
 - mass_effect_legendary_psapi.mypatch - Patch to allow Mass Effect Legendary edition to run - https://github.com/ValveSoftware/Proton/issues/4823#issuecomment-841587666 - Regarding other things needed for the game, see https://github.com/ValveSoftware/Proton/issues/4823#issuecomment-841761975
+- mfplat_nv12_d3d11_buffers.mypatch - Patch by Adrian | cooltyp100 (VKx) to fix Nier: Replicant videos having a green tint - Thanks!
 
 
 ## Misc
-- rockstarlauncher_install_fix.mypatch : Fix for rockstar launcher installer crashing - https://github.com/ValveSoftware/wine/commit/e485252dfad51a7e463643d56fe138129597e4b6 - Doesn't apply to proton-tkg or wine builds using `_protonify="true"` (already included)
-- rockstarlauncher_downloads.mypatch : Hack to workaround failing downloads with rockstar launcher - https://bugs.winehq.org/show_bug.cgi?id=47843 - Doesn't apply to proton-tkg or wine builds using `_protonify="true"` (already included)
+- 0001-rockstarlauncher_install_fix.mypatch : Fix for rockstar launcher installer crashing - https://github.com/ValveSoftware/wine/commit/e485252dfad51a7e463643d56fe138129597e4b6 - Doesn't apply to proton-tkg or wine builds using `_protonify="true"` (already included)
+- 0001-rockstarlauncher_downloads.mypatch : Hack to workaround failing downloads with rockstar launcher - https://bugs.winehq.org/show_bug.cgi?id=47843 - Doesn't apply to proton-tkg or wine builds using `_protonify="true"` (already included)
 - origin_downloads_e4ca5dbe_revert.mypatch : Workaround for Origin client game downloading issues - https://bugs.winehq.org/show_bug.cgi?id=48032
 - 0001-Add-some-semi-stubs-in-user32.mypatch : Fixes black/green screen when running Steep in fullscreen/windowed fullscreen mode, courtesy of Guy1524
 - winex11_limit_resources-nmode.mypatch : Hack to fix DARK SOULS III, Nier: Automata and Sekiro: Shadows Die Twice crashing when there are too many display modes available - This can lead to missing modes on other games if you're affected by the issue - https://github.com/ValveSoftware/wine/pull/83
@@ -46,3 +49,4 @@
 - Shell32-CreateDirectoryInDestinationInFileOp-Move-multiop.mypatch : Fix Multiop fileop MOVE not creating directories in destination. Required for WryeBash Installer functionality - Thanks to @t0suj4
 - Add-SORT_DIGITSAS-UMBERS-flag-to-CompareStringsEx.mypatch : Fix for FL Studio 20.8 crash on startup - https://bugs.winehq.org/show_bug.cgi?id=50362
 - 0001-ntdll-Use-kernel-soft-dirty-flags-for-write-watches-.mypatch : Needed for D3D12 APITracing - Needs a patched kernel (see linux-tkg)
+- wine_wayland_driver.mypatch : Adds experimental Wayland driver - Alexandros Frantzis - https://www.winehq.org/pipermail/wine-devel/2021-June/188412.html
